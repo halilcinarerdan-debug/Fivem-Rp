@@ -1202,13 +1202,83 @@ local function RunConfigSabotageSimCheck()
     return TestConfigDependencies()
 end
 
+-- =====================================================================
+-- ★★★ [KATMAN 24: BRUTAL GATEKEEPER] ÇAPRAZ-KANCA ENTEGRASYON ZİNCİRİ ★★★
+-- Envanter (ox_inventory/forensics tarama), paravan cüzdan (SEC-6 crypto
+-- CAS), adli tıp (AdvanceDecryption zinciri) ve siber telsiz spektrum
+-- (Matrix.Bureau.RadioSpectrum) motorları arasındaki KRİTİK kancaların
+-- hepsi karşı taraf modülünde GERÇEKTEN tanımlı mı -- yoksa biri sessizce
+-- eksik/havada asılı mı (yükleme sırası bozulmuş, modül exception yemiş,
+-- fonksiyon rename edilip diğer uçta güncellenmemiş)? Salt-okunur,
+-- state MUTATE ETMEZ, hiçbir DB/network çağrısı yapmaz (0.00ms bütçesine
+-- sadık, yalnızca tip/varlık kontrolü). Config.Diagnostics.
+-- AbortResourceOnSimulationFailure=true (varsayılan false -- yalnızca
+-- STAGING'de açın) ise ve bu kontrol düşerse, mevcut KATMAN 21
+-- AbortResourceBoot/StopResource yolu zaten otomatik devreye girer;
+-- burada YENİ bir abort mekanizması İCAT EDİLMEDİ, mevcut olana bir
+-- kontrol EKLENDİ.
+-- =====================================================================
+local function RunCrossHookIntegrationSimCheck()
+    local drift = {}
+
+    -- 1) Envanter <-> Adli Tıp: D1-v2/forensics tarama kancası dışa açık mı?
+    if not (Matrix.Forensics and type(Matrix.Forensics.ScanInventoryContraband) == 'function') then
+        drift[#drift + 1] = 'Matrix.Forensics.ScanInventoryContraband disa acik degil'
+    end
+    if not (Matrix.Forensics and type(Matrix.Forensics.InspectBustedBot) == 'function') then
+        drift[#drift + 1] = 'Matrix.Forensics.InspectBustedBot eksik'
+    end
+    if type(Matrix.DepositDealerCargoToTrapStash) ~= 'function' then
+        drift[#drift + 1] = 'Matrix.DepositDealerCargoToTrapStash eksik (D1-v2 IO muhru kopuk)'
+    end
+
+    -- 2) Adli Tıp -> Büro deşifre zinciri
+    if not (Matrix.Bureau and type(Matrix.Bureau.AdvanceDecryption) == 'function') then
+        drift[#drift + 1] = 'Matrix.Bureau.AdvanceDecryption eksik'
+    end
+
+    -- 3) Paravan cüzdan (SEC-6 CAS) zinciri
+    if not (Matrix.Bureau and type(Matrix.Bureau.ProcessBribeCryptoTransaction) == 'function') then
+        drift[#drift + 1] = 'Matrix.Bureau.ProcessBribeCryptoTransaction eksik'
+    end
+    if not (Matrix.Bureau and type(Matrix.Bureau.__CryptoLocks) == 'table') then
+        drift[#drift + 1] = 'Matrix.Bureau.__CryptoLocks kilit tablosu eksik'
+    end
+    if not (Matrix.Bureau and type(Matrix.Bureau.EnsureCryptoWallet) == 'function'
+        and type(Matrix.Bureau.GenerateWalletAddress) == 'function') then
+        drift[#drift + 1] = 'Matrix.Bureau cuzdan olusturma kancalari eksik'
+    end
+
+    -- 4) Siber telsiz spektrum motoru (KATMAN 8 C1) alt-tabloları
+    if not (Matrix.Bureau and type(Matrix.Bureau.RadioSpectrum) == 'table'
+        and type(Matrix.Bureau.RadioSpectrum.PushToTalkAccum) == 'table'
+        and type(Matrix.Bureau.RadioSpectrum.JamStrength) == 'table'
+        and type(Matrix.Bureau.RadioSpectrum.BreachAccum) == 'table') then
+        drift[#drift + 1] = 'Matrix.Bureau.RadioSpectrum alt-tablolari eksik/kismi'
+    end
+
+    -- 5) Sifir-suc muafiyet kancaları (MADDE 5) -- global convar'a
+    -- dokunmadan yalnizca tekil-olay no-op kararini veren predicate'ler.
+    if not (Matrix.Bureau and type(Matrix.Bureau.IsPlayerClean) == 'function'
+        and type(Matrix.Bureau.IsCitizenClean) == 'function') then
+        drift[#drift + 1] = 'Matrix.Bureau.IsPlayerClean/IsCitizenClean kancalari eksik'
+    end
+
+    if #drift > 0 then
+        return false, ('CONTEXT DRIFT -- %d capraz-kanca kopuk: %s'):format(#drift, table.concat(drift, ' | '))
+    end
+
+    return true, 'Envanter / paravan-cuzdan / adli-tip / telsiz-spektrum capraz-kanca zinciri senkron dogrulandi.'
+end
+
 local SimulationChecks = {
     { 'DERIN-SIM: Config Sabotaj ve Bagimlilik Kontrolu (KATMAN 2)',               RunConfigSabotageSimCheck },
     { 'DERIN-SIM: 100 eszamanli async satis stres testi (KATMAN 21.1)',            RunConcurrencyStressCheck },
     { 'DERIN-SIM: Bot yara ceza carpani 4-hane hassasiyeti (KATMAN 21.2)',          RunWoundPrecisionSimCheck },
     { 'DERIN-SIM: Hayalet Doktor 10k-epoch palindrom determinizmi (KATMAN 21.3)',   RunPhantomDoctorPalindromeSimCheck },
     { 'DERIN-SIM: Hit-and-Run drive-by tazelenmesi (KATMAN 22.1)',                  RunHitAndRunDrivebySimCheck },
-    { 'DERIN-SIM: Medikal/Buro sizinti 2x katlanma formulu (KATMAN 22.2)',          RunMedicalBureauLeakSimCheck }
+    { 'DERIN-SIM: Medikal/Buro sizinti 2x katlanma formulu (KATMAN 22.2)',          RunMedicalBureauLeakSimCheck },
+    { 'DERIN-SIM: KATMAN 24 Brutal Gatekeeper -- Capraz-Kanca Entegrasyon Zinciri', RunCrossHookIntegrationSimCheck }
 }
 
 local function AbortResourceBoot(reason)
