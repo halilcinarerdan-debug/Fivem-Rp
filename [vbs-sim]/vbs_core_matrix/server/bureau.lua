@@ -245,6 +245,65 @@ local function FlushDirtyDecryption()
 end
 
 -- =====================================================================
+-- ★★★ [YAMA 6][MADDE 5] SIFIR-SUÇ TEMİZ OYUNCU TESPİTİ ★★★
+-- Global matrix_bureau_intensity convar'ına VE herhangi bir trap
+-- house'un decryption_confidence'ına HİÇ DOKUNMAZ (tek bir global
+-- convar'ı tek oyuncu için 0.0'a kilitlemek, oyuncunun envanterini bir
+-- anlığına temizleyip TÜM SUNUCUNUN ısı tırmanışını sıfırlamasına --
+-- yani sunucu-çapında bir exploit'e -- açık kapı olurdu). Bunun yerine
+-- salt-okunur bir predicate: yalnızca "bu oyuncunun KENDİ tetiklediği
+-- TEKİL olay" bir Bureau kazancı üretecekse, o tek olay için no-op
+-- kararı vermekte kullanılır. State MUTATE ETMEZ.
+--
+-- Temiz sayılma kriterleri (HEPSİ sağlanmalı):
+--   1) Kendi ox_inventory'sinde BM- seri numaralı silah / aktif
+--      maskelenmiş burner_phone / gurme sınırının (Config.Market.
+--      GourmetMinPurity) altında packaged_product YOK
+--      (Matrix.Forensics.ScanInventoryContraband ile AYNI tarama).
+--   2) Kendi crypto cüzdanı (varsa) RAM önbelleğinde 0 bakiyeli.
+-- Forensics modülü yüklü değilse ya da belirsizlikte FAIL-CLOSED
+-- (kirli) varsayılır -- muafiyet yalnızca POZİTİF doğrulamayla verilir.
+-- =====================================================================
+function Matrix.Bureau.IsPlayerClean(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+
+    if not (Matrix.Forensics and Matrix.Forensics.ScanInventoryContraband) then
+        return false
+    end
+    local findings = Matrix.Forensics.ScanInventoryContraband(tostring(src))
+    if #findings > 0 then return false end
+
+    local state = Matrix.GetOrCreatePlayerState and Matrix.GetOrCreatePlayerState(src) or nil
+    local citizenid = state and state.citizenid
+    if not citizenid then return false end
+
+    if Matrix.Bureau.GenerateWalletAddress then
+        local addr = Matrix.Bureau.GenerateWalletAddress(citizenid, 'player')
+        local cached = Matrix.Bureau.CryptoWallets[addr]
+        if cached and (tonumber(cached.crypto_balance) or 0.0) > 0.0 then
+            return false
+        end
+    end
+
+    return true
+end
+
+--- citizenid üzerinden src çözümleyip IsPlayerClean'i çağırır (mevcut
+--- src<->citizenid ters-arama deseniyle AYNI -- bkz. bu dosyada
+--- Matrix.PlayerSourceIndex üzerinde `for src, cid in pairs(...)`
+--- kullanan diğer bloklar). Oyuncu çevrimdışıysa (src bulunamazsa)
+--- FAIL-CLOSED (kirli) döner.
+function Matrix.Bureau.IsCitizenClean(citizenid)
+    if type(citizenid) ~= 'string' or citizenid == '' then return false end
+    for src, cid in pairs(Matrix.PlayerSourceIndex or {}) do
+        if cid == citizenid then
+            return Matrix.Bureau.IsPlayerClean(src)
+        end
+    end
+    return false
+end
+
+-- =====================================================================
 -- COMMS TRIANGULATION (IDW)
 -- =====================================================================
 function Matrix.Bureau.OnUnencryptedComms(actorRef, coords)
@@ -277,6 +336,19 @@ function Matrix.Bureau.OnUnencryptedComms(actorRef, coords)
     local trapHouseId, distToTrap = FindNearestTrapHouse(estimate)
     if not trapHouseId or distToTrap > narrowedRadius then
         return { estimate = estimate, radius = narrowedRadius }
+    end
+
+    -- ★ [YAMA 6][MADDE 5] Bu TEKİL yayın bir 'player' aktöründen geldi
+    -- ve o oyuncu şu an temizse (bkz. IsPlayerClean) -- kendi eyleminin
+    -- Bureau'ya hiçbir kazanç pompalamasına izin verme. Trap house'un
+    -- KENDİ birikmiş state'i (başka olaylardan) ETKİLENMEZ; yalnızca
+    -- BU çağrının katkısı no-op'a döner.
+    if actorRef and actorRef.kind == 'player' and type(actorRef.source) == 'number'
+        and Matrix.Bureau.IsPlayerClean(actorRef.source) then
+        Matrix.Log('BUREAU',
+            '[MADDE 5][TEMIZ OYUNCU] src=%d sifir-suc -- ucgenleme katkisi bastirildi (trap #%d).',
+            actorRef.source, trapHouseId)
+        return { estimate = estimate, radius = narrowedRadius, trap_house_id = trapHouseId, gain = 0.0, suppressed_clean = true }
     end
 
     Matrix.Bureau.LogPatternEvent(trapHouseId)

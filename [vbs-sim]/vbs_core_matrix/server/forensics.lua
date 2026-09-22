@@ -1028,6 +1028,11 @@ local function ScanInventoryContraband(inventoryId)
     return findings
 end
 
+-- ★ [YAMA 6][MADDE 5] Var olan taramayı Matrix.Forensics tablosuna
+-- açıyoruz (mantık AYNI, kopyalanmadı) -- bureau.lua'daki
+-- Matrix.Bureau.IsPlayerClean bunu doğrudan çağırır.
+Matrix.Forensics.ScanInventoryContraband = ScanInventoryContraband
+
 
 local function ScanTrunkContraband(plate)
     if type(plate) ~= 'string' or plate == '' then return {} end

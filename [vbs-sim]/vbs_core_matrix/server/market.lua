@@ -503,6 +503,18 @@ end
 function Matrix.RadioSilence.BreakForRedirect(citizenid, botId, trapHouseId)
     if type(citizenid) ~= 'string' or citizenid == '' then return 0.0, 0.0 end
 
+    -- ★ [YAMA 6][MADDE 5] Sifir-suc oyuncu muafiyeti -- global convar/
+    -- trap house state'ine dokunmaz, yalnizca BU oyuncunun KENDI
+    -- tetikledigi bu tekil ihlal icin no-op karar verir. Statik parazit
+    -- de, decryption sicramasi da, ardisik-kirilma sayaci da ARTMAZ --
+    -- temiz bir oyuncu icin bu olay hic yasanmamis gibi davranilir.
+    if Matrix.Bureau and Matrix.Bureau.IsCitizenClean and Matrix.Bureau.IsCitizenClean(citizenid) then
+        Matrix.Log('MARKET',
+            '[MADDE 5][TEMIZ OYUNCU] %s sifir-suc -- sessizlik ihlali cezasi bastirildi (Bot #%s).',
+            citizenid, tostring(botId))
+        return 0.0, 0.0
+    end
+
     local n = (SilenceBreakCount[citizenid] or 0) + 1
     SilenceBreakCount[citizenid] = n
     local geometricStep = Config.RadioSilence.BreakGeometricFactor ^ (n - 1)
