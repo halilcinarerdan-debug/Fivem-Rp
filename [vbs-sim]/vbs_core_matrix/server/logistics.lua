@@ -2027,3 +2027,25 @@ RegisterCommand('relaypurge', function(src)
     Matrix.Logistics.PortArrivalFlags       = {}
     Reply(src, ('[RELAY PURGE] %d bot, %d client, %d port-flag kaydi kazindi.'):format(nBot, nCli, nPort))
 end, false)
+
+-- =====================================================================
+-- ★★★ [YAMA 5][STALE MEMORY DRIFT TAMIRI] SERVER-AUTHORITATIVE
+-- PLAYERDROPPED PURGE ★★★
+-- __RelayCooldownByBotId, Matrix.RemoveBot icinde bot silindiginde
+-- zaten temizleniyordu (main.lua). __RelayCooldownByClient'in ise
+-- (src bazli) hicbir playerDropped kancasi yoktu -- temizligi tamamen
+-- _PurgeRelayCooldowns'un firsatci TTL taramasina birakiyordu, o da
+-- yalnizca bir bot liman rampasina girince calisiyordu. FiveM src
+-- id'leri disconnect sonrasi yeni oyunculara RECYCLE edildigi icin,
+-- bu pencere icinde reconnect eden yeni bir oyuncu ayrilanin eski
+-- cooldown timestamp'ini miras alabiliyordu. Artik oyuncu ayrilir
+-- ayrilmaz kendi src kaydi kazinir -- iki tablo da simdi ayni
+-- server-authoritative temizlik garantisine sahip.
+-- =====================================================================
+AddEventHandler('playerDropped', function()
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if Matrix.Logistics.__RelayCooldownByClient then
+        Matrix.Logistics.__RelayCooldownByClient[src] = nil
+    end
+end)

@@ -184,7 +184,10 @@ if not Matrix.PhoneBridge._DepositCargoWrapped then
     local _origDepositCargo = Matrix.DepositDealerCargoToTrapStash
 
     function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
-        local result = _origDepositCargo(botId, trapHouseId)
+        -- ★ [YAMA 5][D1-v2 TAMIR] ikinci deger (hadUnrecoverableLoss)
+        -- orijinal fonksiyondan CompleteDispatch'e kadar seffaf gecmeli;
+        -- sarmalayici bunu yutarsa IO muhru yine korlenmeden acilir.
+        local result, hadUnrecoverableLoss = _origDepositCargo(botId, trapHouseId)
 
         local bot = Matrix.Bots and Matrix.Bots[botId]
         if bot and result ~= nil then
@@ -199,7 +202,7 @@ if not Matrix.PhoneBridge._DepositCargoWrapped then
             end)
         end
 
-        return result
+        return result, hadUnrecoverableLoss
     end
 end
 
@@ -525,6 +528,19 @@ end)
 -- =====================================================================
 
 local RemoteWipeCooldown = {}  -- [src] = sonraki izinli zaman (Unix saniye)
+
+-- ★★★ [YAMA 5][STALE MEMORY DRIFT TAMIRI] ★★★
+-- RemoteWipeCooldown'un hicbir temizlik mekanizmasi yoktu (ne TTL
+-- taramasi, ne playerDropped kancasi) -- matrix:server:phone:remoteWipe'i
+-- tetikleyen HER benzersiz src icin kayit, resource restart'a kadar
+-- kalici olarak birikiyordu. src degerleri disconnect sonrasi yeniden
+-- kullanilabildigi icin bu, en net "hayalet iz" (stale memory drift)
+-- ornegiydi. Artik oyuncu ayrilir ayrilmaz kendi kaydi kazinir.
+AddEventHandler('playerDropped', function()
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    RemoteWipeCooldown[src] = nil
+end)
 
 RegisterNetEvent('matrix:server:phone:remoteWipe', function(dnaIdHint)
     local src = source

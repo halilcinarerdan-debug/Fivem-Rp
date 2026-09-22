@@ -2038,16 +2038,22 @@ local function _BurnAndRaidByHolder(holderIdentifier)
     end
 end
 
---- ★ [SEC-6][YAMA 2] Rolling cipher mutasyon protokolü — Lua-seviyesi
---- satır kilidi + SELECT ... FOR UPDATE + DB CAS.
+--- ★ [SEC-6][YAMA 2 TAMIR] Rolling cipher mutasyon protokolü — Lua-seviyesi
+--- satır kilidi (exception-safe) + SELECT ... FOR UPDATE (taze okuma) + DB CAS.
 ---
 --- Akış:
 ---   1) __CryptoLocks[walletAddress] al (aynı cüzdana eşzamanlı giriş yasak).
----   2) SELECT ... FOR UPDATE (InnoDB satır kilidi, taze okuma).
+---   2) SELECT ... FOR UPDATE (taze okuma — NOT: iki ayrı .await havuzdan
+---      bağımsız bağlantı kullanabildiği için bu InnoDB kilidi iki
+---      round-trip arasında AÇIK KALMAZ; cross-request yarış koruması
+---      adım 5'teki CAS UPDATE'tedir, bağlantıdan bağımsız çalışır).
 ---   3) Context drift kontrolü — DB holder ile target uyuşmuyorsa RED.
 ---   4) CAS UPDATE (WHERE rolling_cipher_key = oldKey).
 ---   5) Yalnızca affected == 1 ise RAM önbelleğine yaz.
----   6) Kilit HER durumda bırakılır (pcall/finally).
+---   6) Kilit HER durumda (başarı/mantıksal red/beklenmeyen Lua hatası)
+---      TEK bir pcall gövdesinin dışında, TAM OLARAK BİR KEZ bırakılır —
+---      gövde ortasında atılan herhangi bir hata artık kilidi sonsuza
+---      dek açık bırakamaz (önceki sürümdeki self-DoS penceresi kapatıldı).
 function Matrix.Bureau.ProcessBribeCryptoTransaction(walletAddress, amount, targetIdentifier)
     if type(walletAddress) ~= 'string' or walletAddress == '' then return false, 'bad_wallet' end
     amount = tonumber(amount)
@@ -2060,85 +2066,96 @@ function Matrix.Bureau.ProcessBribeCryptoTransaction(walletAddress, amount, targ
     end
     Matrix.Bureau.__CryptoLocks[walletAddress] = true
 
-    local function _releaseLock()
-        Matrix.Bureau.__CryptoLocks[walletAddress] = nil
-    end
+    -- ★★★ [YAMA 2 TAMIR] Tüm gövde TEK bir pcall içinde — try/finally
+    -- emülasyonu. İçeride artık _releaseLock() ÇAĞRILMIYOR; kilit
+    -- yalnızca aşağıda, pcall'dan çıkıldıktan SONRA, koşulsuz açılıyor.
+    local ok, txOk, reasonOrPayload = pcall(function()
+        -- ★ 2) SELECT ... FOR UPDATE (taze okuma).
+        local selOk, selRows = pcall(function()
+            return MySQL.query.await(
+                'SELECT holder_identifier, holder_type, crypto_balance, rolling_cipher_key, tx_sequence FROM matrix_crypto_wallets WHERE wallet_address = ? FOR UPDATE',
+                { walletAddress })
+        end)
+        if not selOk or type(selRows) ~= 'table' or not selRows[1] then
+            return false, 'wallet_not_found'
+        end
+        local row = selRows[1]
+        local holderIdentifier = row.holder_identifier
+        local balance          = tonumber(row.crypto_balance) or 0.0
+        local oldKey            = row.rolling_cipher_key
+        local oldSeq            = tonumber(row.tx_sequence) or 0
 
-    -- ★ 2) SELECT ... FOR UPDATE (InnoDB satır kilidi).
-    local selOk, selRows = pcall(function()
-        return MySQL.query.await(
-            'SELECT holder_identifier, holder_type, crypto_balance, rolling_cipher_key, tx_sequence FROM matrix_crypto_wallets WHERE wallet_address = ? FOR UPDATE',
-            { walletAddress })
-    end)
-    if not selOk or type(selRows) ~= 'table' or not selRows[1] then
-        _releaseLock()
-        return false, 'wallet_not_found'
-    end
-    local row = selRows[1]
-    local holderIdentifier = row.holder_identifier
-    local balance          = tonumber(row.crypto_balance) or 0.0
-    local oldKey           = row.rolling_cipher_key
-    local oldSeq           = tonumber(row.tx_sequence) or 0
+        -- ★ 3) Context drift: DB holder ile target uyuşmuyor.
+        -- KURBAN KORUMASI: burn+raid DB'den okunan meşru holder üzerinde.
+        if holderIdentifier ~= targetIdentifier then
+            Matrix.Bureau.CryptoWallets[walletAddress] = nil
+            _BurnAndRaidByHolder(holderIdentifier)
+            Matrix.Log('BUREAU',
+                '[SEC-6][CONTEXT DRIFT] wallet=%s legit-holder=%s caller-target=%s -- ROLLBACK, burn+raid LEGIT holder uzerinde.',
+                walletAddress, holderIdentifier, targetIdentifier)
+            return false, 'context_drift'
+        end
 
-    -- ★ 3) Context drift: DB holder ile target uyuşmuyor.
-    -- KURBAN KORUMASI: burn+raid DB'den okunan meşru holder üzerinde.
-    if holderIdentifier ~= targetIdentifier then
-        _releaseLock()
-        Matrix.Bureau.CryptoWallets[walletAddress] = nil
-        _BurnAndRaidByHolder(holderIdentifier)
+        if balance < amount then
+            return false, 'insufficient_balance'
+        end
+
+        -- ★ 4) Cipher mutasyonu (deterministik, RNG yok).
+        local newSeq = oldSeq + 1
+        local mutationInput = ('%s#%.4f#%s#%d'):format(oldKey, amount, holderIdentifier, newSeq)
+        local newKey     = _CryptoSha256Like(mutationInput)
+        local newBalance = balance - amount
+
+        -- ★ 5) CAS UPDATE — WHERE rolling_cipher_key = oldKey. Gerçek
+        -- cross-request yarış koruması budur: iki eşzamanlı yazardan
+        -- yalnızca biri bu WHERE koşuluyla eşleşebilir.
+        local updOk, affected = pcall(function()
+            return MySQL.update.await([[
+                UPDATE matrix_crypto_wallets
+                SET crypto_balance = ?, rolling_cipher_key = ?, tx_sequence = ?, updated_at = NOW()
+                WHERE wallet_address = ? AND rolling_cipher_key = ?
+            ]], { newBalance, newKey, newSeq, walletAddress, oldKey })
+        end)
+
+        if not updOk or type(affected) ~= 'number' or affected == 0 then
+            -- CAS başarısız. RAM önbelleği SİLİNİR (lazy reload).
+            -- ★ KURBAN KORUMASI: burn+raid DB'den okunan holder üzerinde.
+            Matrix.Bureau.CryptoWallets[walletAddress] = nil
+            _BurnAndRaidByHolder(holderIdentifier)
+            Matrix.Log('BUREAU',
+                '[SEC-6][CIPHER DRIFT / RACE] wallet=%s -- CAS reddedildi, burn+raid LEGIT holder (%s) uzerinde.',
+                walletAddress, holderIdentifier)
+            return false, 'cipher_drift'
+        end
+
+        -- ★ 6) Yalnızca KAZANAN CAS RAM önbelleğine yazar.
+        Matrix.Bureau.CryptoWallets[walletAddress] = {
+            wallet_address     = walletAddress,
+            holder_identifier  = holderIdentifier,
+            holder_type        = row.holder_type,
+            crypto_balance     = newBalance,
+            rolling_cipher_key = newKey,
+            tx_sequence        = newSeq,
+        }
+
         Matrix.Log('BUREAU',
-            '[SEC-6][CONTEXT DRIFT] wallet=%s legit-holder=%s caller-target=%s -- ROLLBACK, burn+raid LEGIT holder uzerinde.',
-            walletAddress, holderIdentifier, targetIdentifier)
-        return false, 'context_drift'
-    end
-
-    if balance < amount then
-        _releaseLock()
-        return false, 'insufficient_balance'
-    end
-
-    -- ★ 4) Cipher mutasyonu (deterministik, RNG yok).
-    local newSeq = oldSeq + 1
-    local mutationInput = ('%s#%.4f#%s#%d'):format(oldKey, amount, holderIdentifier, newSeq)
-    local newKey     = _CryptoSha256Like(mutationInput)
-    local newBalance = balance - amount
-
-    -- ★ 5) CAS UPDATE — WHERE rolling_cipher_key = oldKey.
-    local updOk, affected = pcall(function()
-        return MySQL.update.await([[
-            UPDATE matrix_crypto_wallets
-            SET crypto_balance = ?, rolling_cipher_key = ?, tx_sequence = ?, updated_at = NOW()
-            WHERE wallet_address = ? AND rolling_cipher_key = ?
-        ]], { newBalance, newKey, newSeq, walletAddress, oldKey })
+            '[SEC-6][CRYPTO] wallet=%s -> $%.4f transfer, tx_seq=%d, cipher mutasyona ugradi.',
+            walletAddress, amount, newSeq)
+        return true, { tx_sequence = newSeq, balance = newBalance }
     end)
 
-    _releaseLock()
+    -- ★ Kilit HER KOŞULDA (başarı / mantıksal red / beklenmeyen Lua
+    -- hatası) burada, koşulsuz ve TEK SEFER açılır.
+    Matrix.Bureau.__CryptoLocks[walletAddress] = nil
 
-    if not updOk or type(affected) ~= 'number' or affected == 0 then
-        -- CAS başarısız. RAM önbelleği SİLİNİR (lazy reload).
-        -- ★ KURBAN KORUMASI: burn+raid DB'den okunan holder üzerinde.
-        Matrix.Bureau.CryptoWallets[walletAddress] = nil
-        _BurnAndRaidByHolder(holderIdentifier)
+    if not ok then
         Matrix.Log('BUREAU',
-            '[SEC-6][CIPHER DRIFT / RACE] wallet=%s -- CAS reddedildi, burn+raid LEGIT holder (%s) uzerinde.',
-            walletAddress, holderIdentifier)
-        return false, 'cipher_drift'
+            '[HATA][SEC-6] ProcessBribeCryptoTransaction beklenmeyen hata (yutuldu, kilit acildi): %s',
+            tostring(txOk))
+        return false, 'internal_error'
     end
 
-    -- ★ 6) Yalnızca KAZANAN CAS RAM önbelleğine yazar.
-    Matrix.Bureau.CryptoWallets[walletAddress] = {
-        wallet_address     = walletAddress,
-        holder_identifier  = holderIdentifier,
-        holder_type        = row.holder_type,
-        crypto_balance     = newBalance,
-        rolling_cipher_key = newKey,
-        tx_sequence        = newSeq,
-    }
-
-    Matrix.Log('BUREAU',
-        '[SEC-6][CRYPTO] wallet=%s -> $%.4f transfer, tx_seq=%d, cipher mutasyona ugradi.',
-        walletAddress, amount, newSeq)
-    return true, { tx_sequence = newSeq, balance = newBalance }
+    return txOk, reasonOrPayload
 end
 
 exports('ProcessBribeCryptoTransaction', function(walletAddress, amount, targetIdentifier)

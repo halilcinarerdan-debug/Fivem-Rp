@@ -958,12 +958,19 @@ function Matrix.BeginRouteDispatch(botId, origin, waypointRefs, finalRef, plate,
     return true
 end
 
+-- ★★★ [YAMA 5][D1-v2 TAMIR] AGREGE MÜHÜR YAMASI ★★★
+--   movedAny artik TEK BASINA "basari" anlamina gelmiyor: bir parti
+--   icindeki HERHANGI bir esya hem AddItem hem telafi-AddItem'i
+--   kaybederse (kalici kayip), fonksiyon movedAny=true dahi olsa
+--   ikinci deger olarak hadUnrecoverableLoss=true doner. Cagiran taraf
+--   (CompleteDispatch) bu ikinci degeri IO muhrune baglar; boylece
+--   "3 esyadan 1'i basarili" durumu artik sessizce basari sayilmiyor.
 function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
     local inventoryId = ('dealer_%d'):format(botId)
     local stashId      = ('matrix_trap_stash_%d'):format(trapHouseId)
 
     local invOk, inv = pcall(exports['ox_inventory'].GetInventory, exports['ox_inventory'], inventoryId)
-    if not invOk or type(inv) ~= 'table' or type(inv.items) ~= 'table' then return false end
+    if not invOk or type(inv) ~= 'table' or type(inv.items) ~= 'table' then return false, false end
 
     local house = Matrix.TrapHouses and Matrix.TrapHouses[trapHouseId]
     local stashLabel = (house and house.label and ('%s Deposu'):format(house.label))
@@ -973,7 +980,8 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
         exports['ox_inventory']:RegisterStash(stashId, stashLabel, 100, 200000)
     end)
 
-    local movedAny = false
+    local movedAny             = false
+    local hadUnrecoverableLoss = false
     for slot, item in pairs(inv.items) do
         if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) > 0 then
             local itemName, itemCount, itemMeta = item.name, item.count, item.metadata
@@ -994,8 +1002,9 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
                         return exports['ox_inventory']:AddItem(inventoryId, itemName, itemCount, itemMeta)
                     end)
                     if not (restoreOk and restored == true) then
+                        hadUnrecoverableLoss = true
                         Matrix.Log('CORE',
-                            '[KRITIK] DepositDealerCargoToTrapStash: Bot #%d, esya (%s x%s) AddItem+telafi ikisi de basarisiz -- olasi kayip.',
+                            '[KRITIK][D1-v2 TAMIR] DepositDealerCargoToTrapStash: Bot #%d, esya (%s x%s) AddItem+telafi ikisi de basarisiz -- kalici kayip, IO muhru KILITLENECEK.',
                             botId, tostring(itemName), tostring(itemCount))
                     end
                 end
@@ -1008,7 +1017,7 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
             '[OTOMATIK TESLIMAT] Bot #%d yuku Trap House #%d deposuna (%s) aktarildi, kutle hafifledi.',
             botId, trapHouseId, stashId)
     end
-    return movedAny
+    return movedAny, hadUnrecoverableLoss
 end
 
 -- =====================================================================
@@ -1074,8 +1083,16 @@ function Matrix.CompleteDispatch(botId, reason)
 
             local nearestTrapId, nearestTrapDist = FindNearestTrapHouse(destination)
             if nearestTrapId and nearestTrapDist <= Config.Logistics.TrapHouseArrivalStashRadius then
+                -- ★ [YAMA 5][D1-v2 TAMIR] hadUnrecoverableLoss=true ise
+                -- _TrackIO'ya boolean DEGIL nil donduruyoruz -- mevcut
+                -- _TrackIO sozlesmesi (noOpIsSuccess=true dalinda yalnizca
+                -- boolean donusler "settled" sayilir) hicbir degisiklik
+                -- gerektirmeden bunu FAIL olarak isaretler ve is_locked
+                -- kilitli kalir.
                 _TrackIO(true, function()
-                    return Matrix.DepositDealerCargoToTrapStash(botId, nearestTrapId)
+                    local moved, hadUnrecoverableLoss = Matrix.DepositDealerCargoToTrapStash(botId, nearestTrapId)
+                    if hadUnrecoverableLoss then return nil end
+                    return moved
                 end)
 
                 if Matrix.Market and Matrix.Market.FlushBotStreetCash then

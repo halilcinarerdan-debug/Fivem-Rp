@@ -1337,6 +1337,18 @@ ALTER TABLE `matrix_forensic_evidence`
 ALTER TABLE `matrix_forensic_evidence`
     ADD COLUMN IF NOT EXISTS `inflicted_force_striation` FLOAT NOT NULL DEFAULT 0.0;
 
+-- ★★★ [YAMA 3][ASİMPTOTİK ERİME İNDEKS MÜHRÜ] ★★★
+-- forensics.lua TickEvidenceDecayHourly (saatlik UPDATE) ve
+-- PurgeDecayedEvidence (saatlik DELETE) ikisi de
+-- `sealed_as_crime_weapon = 0` (+ purge için striation/fingerprint
+-- eşik karşılaştırması) üzerinden filtreliyordu; tabloda bu kolonlara
+-- dair HİÇBİR index yoktu (yalnızca PK + ballistic_id vardı) -> her
+-- saat tam tablo taraması + satır kilidi. Kompozit index, öncü kolonu
+-- (sealed_as_crime_weapon) ile hem UPDATE'in WHERE'ini hem DELETE'in
+-- üç-kolonlu WHERE'ini aynı index range-scan'iyle karşılıyor.
+CREATE INDEX IF NOT EXISTS `idx_matrix_forensic_evidence_decay_sweep`
+    ON `matrix_forensic_evidence` (`sealed_as_crime_weapon`, `striation_quality`, `fingerprint_quality`);
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- =======================================================================

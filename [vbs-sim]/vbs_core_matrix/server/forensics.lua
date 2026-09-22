@@ -1602,40 +1602,18 @@ end)
 -- KATMAN 8 — CEPHE C2: ADLİ DELİL ASİMPTOTİK ERİMESİ
 -- =====================================================================
 
-local _EVIDENCE_DECAY_TICK_MS = 60 * 60 * 1000
-local _EVIDENCE_DECAY_RATE    = 0.002
-local _lastDecayTickEpoch     = nil
-
+-- ★★★ [YAMA 3 TAMIR] ÇİFT ERİME HATTI TEKİLLEŞTİRİLDİ ★★★
+-- Bu fonksiyon eskiden KENDİ bağımsız _EVIDENCE_DECAY_TICK_MS /
+-- _EVIDENCE_DECAY_RATE / _lastDecayTickEpoch state'iyle, aşağıdaki
+-- Matrix.Forensics.TickEvidenceDecayHourly ile AYNI satırlar üzerinde
+-- BAĞIMSIZ ikinci bir erime geçidi çalıştırıyordu. Export dışarıdan
+-- (başka bir resource) çağrılırsa kanıt kalitesi öngörülemez şekilde
+-- çifte eriyordu. Artık export CANLI kalıyor (geriye dönük uyumluluk,
+-- kaldırılmadı) ama TEK doğrulanmış zaman damgası kuyruğuna
+-- (TickEvidenceDecayHourly'nin kendi epoch'u) yönlendiriliyor —
+-- ikinci bağımsız epoch tracker'ı yok edildi.
 function Matrix.Forensics.TickEvidenceDecay()
-    local nowEpoch = os.time()
-
-    local deltaMinutes
-    if _lastDecayTickEpoch then
-        deltaMinutes = math.max((nowEpoch - _lastDecayTickEpoch) / 60.0, 0.0)
-    else
-        deltaMinutes = _EVIDENCE_DECAY_TICK_MS / 60000.0
-    end
-    _lastDecayTickEpoch = nowEpoch
-
-    if deltaMinutes <= 0.0 then return end
-
-    local decayFactor = math.exp(-_EVIDENCE_DECAY_RATE * deltaMinutes)
-
-    local ok, affected = pcall(function()
-        return MySQL.update.await([[
-            UPDATE matrix_forensic_evidence
-            SET striation_quality   = GREATEST(0.0, LEAST(1.0, striation_quality   * ?)),
-                fingerprint_quality = GREATEST(0.0, LEAST(1.0, fingerprint_quality * ?))
-            WHERE sealed_as_crime_weapon = 0
-        ]], { decayFactor, decayFactor })
-    end)
-    if ok then
-        Matrix.Log('FORENSICS',
-            '[ADLİ DELİL ERİMESİ] Mühürsüz kanıt delta-bazlı erimeye tabi tutuldu (delta=%.2fdk faktor=%.4f etkilenen=%s).',
-            deltaMinutes, decayFactor, tostring(affected or '?'))
-    else
-        Matrix.Log('FORENSICS', '[HATA] TickEvidenceDecay UPDATE basarisiz (yutuldu).')
-    end
+    return Matrix.Forensics.TickEvidenceDecayHourly()
 end
 
 exports('TickEvidenceDecay', function() return Matrix.Forensics.TickEvidenceDecay() end)
