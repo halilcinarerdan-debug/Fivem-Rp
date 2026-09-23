@@ -34,6 +34,59 @@ local function HasCommandAuthority(src)
         and Matrix.Hierarchy.HasCommandAuthority(citizenid) == true
 end
 
+-- =====================================================================
+-- ★ [MODUL 16.2] CO-OP EMIR ROLESI: Tim Alfa/Bravo bolunmesi ve OpenAI
+-- uzaktan sevk emirleri ARTIK yalnizca emri veren Baronun istemcisinde
+-- yerel KALMAZ -- rutbede komuta yetkisi olan (Matrix.Hierarchy.
+-- HasCommandAuthority) TUM baglı Co-Op ortaklarina net-event ile
+-- YAYINLANIR. Ikinci bir "oyuncu listesi" taramasi ICAT EDILMEZ --
+-- MEVCUT GetPlayers() + HasCommandAuthority deseni kullanilir.
+-- =====================================================================
+function Matrix.TeamAI.BroadcastToCommandAuthority(message, excludeSrc)
+    for _, plyIdStr in ipairs(GetPlayers()) do
+        local plySrc = tonumber(plyIdStr)
+        if plySrc and plySrc ~= excludeSrc and HasCommandAuthority(plySrc) then
+            TriggerClientEvent('chat:addMessage', plySrc, { args = { '[KARARGAH BULTENI]', message } })
+        end
+    end
+end
+
+--- ★ Salt-okunur getter: F6/K panelinin (client/hud.lua) Co-Op'ta TAM
+--- senkronize gorebilmesi icin -- hangi tim, hangi OpenAI gorev kodunu
+--- (sneak_mode/lspd_engagement/casualty_protocol) yurutuyor ve lideri
+--- kim. Turnike/panik durumu (server/wound_system.lua Matrix.Wounds ile
+--- AYNI alanlar) member_status icinde raporlanir -- ikinci bir "yara
+--- durumu" tablosu ICAT EDILMEZ.
+local function BuildTeamCommandReport()
+    local report = {}
+    for team in pairs(Config.TeamAI.ValidTeams) do
+        local ids = GetTeamBotIds(team)
+        if #ids > 0 then
+            local members = {}
+            for _, botId in ipairs(ids) do
+                local bot = Matrix.Bots[botId]
+                members[#members + 1] = {
+                    bot_id     = botId,
+                    name       = bot and bot.name or nil,
+                    panicking  = (Matrix.Wounds and Matrix.Wounds.IsBotPanicking and Matrix.Wounds.IsBotPanicking(botId)) or false,
+                    status     = bot and bot.status or nil
+                }
+            end
+            report[team] = {
+                leader_id = ids[1],
+                directive = Matrix.TeamAI.Directives[team],
+                members   = members
+            }
+        end
+    end
+    return report
+end
+
+lib.callback.register('matrix:callback:getTeamCommandReport', function(src)
+    if not HasCommandAuthority(src) then return {} end
+    return BuildTeamCommandReport()
+end)
+
 --- ★ Salt-okunur getter: bir timdeki TUM bot id'lerini KUCUKTEN BUYUGE
 --- siralanmis dondurur -- ids[1] HER ZAMAN o timin lideridir.
 local function GetTeamBotIds(team)
@@ -207,11 +260,17 @@ RegisterCommand('timeemir', function(src, args)
             or 'sabotaj protokolu'
         local fallbackLabel = directive.fallback_coords and 'guvenli koordinata donuyoruz' or 'en yakin sigina donuyoruz'
 
-        Reply(src, ('[BZZZT] -- Baronum, talimat alindi. %s Lideri konusuyor: Sizma modu %s, LEO temasinda %s, lider duserse %s, muhurlendi!'):format(
+        local bulletin = ('[BZZZT] -- Baronum, talimat alindi. %s Lideri konusuyor: Sizma modu %s, LEO temasinda %s, lider duserse %s, muhurlendi!'):format(
             team:upper(),
             directive.sneak_mode and 'aktif' or 'pasif',
             engagementLabel,
-            fallbackLabel))
+            fallbackLabel)
+
+        -- ★ [MODUL 16.2] emri veren Baronun kendi ekranina DOGRUDAN, diger
+        -- TUM komuta yetkili Co-Op ortaklarina ise net-event yayiniyla
+        -- ULASIR -- yerel kalmaz.
+        Reply(src, bulletin)
+        Matrix.TeamAI.BroadcastToCommandAuthority(bulletin, src)
     end, 'POST', body, {
         ['Content-Type']  = 'application/json',
         ['Authorization'] = 'Bearer ' .. Config.AI_Matrix_Brain.apiKey

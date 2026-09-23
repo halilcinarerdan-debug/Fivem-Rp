@@ -1,3 +1,12 @@
+-- ★ [MODUL 16.1] EMNIYET ILKLENDIRMESI: bu dosyalarin hicbiri global Matrix
+-- tablosunu calisma zamaninda okumaz (bkz. server-side yorumlar), ama
+-- ileride bir referans eklenirse client-side VM'in erken/farkli sirada
+-- yuklenmesi durumunda nil-index hatasi ASLA olusmasin diye zararsiz bir
+-- guvenlik agi olarak eklenir.
+Matrix = Matrix or {}
+Matrix.Client = Matrix.Client or {}
+
+
 -- =====================================================================
 -- ★★★ client/humint_stalking.lua — HUMINT ADAPTIF TAKİP MOTORU ★★★
 --
