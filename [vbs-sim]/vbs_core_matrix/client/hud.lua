@@ -396,6 +396,60 @@ AddEventHandler('onClientResourceStart', function(resourceName)
 end)
 
 -- =====================================================================
+-- ★ [FIX] TAKTIK HUD RENDER DONGUSU -- BU DOSYADA DAHA ONCE HICBIR YERDE
+-- YOKTU: hudActive/hudLines dogru sekilde tutuluyor (ToggleHud, hudSnapshot
+-- event'i), ama onlari EKRANA CIZEN bir CreateThread dongusu hic
+-- YAZILMAMISTI -- DrawMonoLine bu dosyada yalnizca [U3] mekanik tutukluk
+-- uyarisi icin cagriliyordu. F6/K basildiginda hudActive dogru sekilde
+-- toggle oluyor VE sunucudan snapshot geliyordu, ama HICBIR SEY EKRANA
+-- BASILMIYORDU -- "HUD bulten cercevesi ekrana gelmiyor" sikayetinin
+-- KOK NEDENI budur (bir race/yaris kosulu veya ag kesintisi DEGIL).
+--
+-- hudActive=false iken dongu Wait(250) ile HAFIF bekler (0 Resmon
+-- disiplini); hudActive=true iken her frame (Wait(0)) sabit basliktan
+-- itibaren hudLines dizisini SIRAYLA cizer -- header/danger/normal
+-- satirlar COLOR_HEADER/COLOR_DANGER/COLOR_VALUE ile ayirt edilir.
+-- =====================================================================
+local HUD_ORIGIN_X     = 0.015
+local HUD_ORIGIN_Y     = 0.04
+local HUD_LINE_HEIGHT  = 0.021
+local HUD_TEXT_SCALE   = 0.32
+
+CreateThread(function()
+    while true do
+        if hudActive then
+            local y = HUD_ORIGIN_Y
+            DrawMonoLine(HUD_ORIGIN_X, y, '=== TAKTIK HUD (MATRIX) ===', COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3], HUD_TEXT_SCALE)
+            y = y + HUD_LINE_HEIGHT
+
+            if #hudLines == 0 then
+                -- ★ [FIX] sunucudan HENUZ ilk snapshot gelmediyse (agir
+                -- gecikme/ag kesintisi) bulten cercevesi BOS BEKLEMEZ --
+                -- senkronize ediliyor bulteni ANINDA cizilir, bos bir
+                -- ekran ASLA gorulmez.
+                DrawMonoLine(HUD_ORIGIN_X, y, '[SENKRONIZE EDILIYOR...]', COLOR_DIM[1], COLOR_DIM[2], COLOR_DIM[3], HUD_TEXT_SCALE)
+            else
+                for i = 1, #hudLines do
+                    local line = hudLines[i]
+                    local r, g, b = COLOR_VALUE[1], COLOR_VALUE[2], COLOR_VALUE[3]
+                    if line.danger then
+                        r, g, b = COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3]
+                    elseif line.header then
+                        r, g, b = COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3]
+                    end
+                    DrawMonoLine(HUD_ORIGIN_X, y, line.text, r, g, b, HUD_TEXT_SCALE)
+                    y = y + HUD_LINE_HEIGHT
+                end
+            end
+
+            Wait(0)
+        else
+            Wait(250)
+        end
+    end
+end)
+
+-- =====================================================================
 -- ★ KATMAN 5 ULTIMATE [U3]: MEKANİK TUTUKLUK TESPİTİ & TAHLİYE
 --
 -- Mermi-sayısı-azalma (ammo-delta) tespiti kullanılır — IsPedShooting'in

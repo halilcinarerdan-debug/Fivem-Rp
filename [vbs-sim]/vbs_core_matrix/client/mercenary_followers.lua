@@ -441,6 +441,96 @@ RegisterKeyMapping('timeemirac', 'HQ Tim Emri Panelini Ac (OpenAI) ([H] - F10 ic
 
 
 -- =====================================================================
+-- ★ [F10] TAKTIK KOMUTA MENUSU -- Canli Kadro (yerel takipci listesi) +
+-- Tim Alfa/Bravo durumu (server/team_ai.lua matrix:callback:
+-- getTeamCommandReport -- MODUL 15/16 ile AYNI rapor, ikinci bir "tim
+-- durumu" sorgusu ICAT EDILMEZ) TEK bir monokrom bulten olarak basilir.
+--
+-- ★ TASARIM NOTU: bu kaynagin HUD'u BASTAN ASAGI "saf metin tabanli,
+-- monokrom... HTML/CSS OLMAKSIZIN" ilkesiyle insa edilmis (bkz. client/
+-- hud.lua dosya basi). lib.context/lib.showContext bir NUI (HTML/CSS)
+-- bileseni oldugundan bu ilkeyle CELISIR -- bu yuzden ayni "eski
+-- monokrom bulten yapisi" (chat:addMessage satir dizisi, MEVCUT Reply()
+-- desenlerinin AYNISI) tercih edildi; ikinci bir arayuz teknolojisi/
+-- bagimliligi ICAT EDILMEZ.
+-- =====================================================================
+local function Bulletin(line)
+    TriggerEvent('chat:addMessage', { args = { '[TAKTIK KOMUTA]', line } })
+end
+
+local TEAM_ENGAGEMENT_LABELS = {
+    flee    = 'GERI CEKIL',
+    attack  = 'ANGAJE OL',
+    sabotage = 'SABOTAJ'
+}
+
+local function PrintTeamReport()
+    local ok, report = pcall(lib.callback.await, 'matrix:callback:getTeamCommandReport', false)
+    if not ok or type(report) ~= 'table' or next(report) == nil then
+        Bulletin('-- TIM ALFA/BRAVO: atanmis tim yok veya komuta yetkiniz yok (/timata ile atayin) --')
+        return
+    end
+
+    for _, team in ipairs({ 'alfa', 'bravo' }) do
+        local t = report[team]
+        if t then
+            Bulletin(('-- TIM %s -- Lider: Bot #%s --'):format(team:upper(), tostring(t.leader_id)))
+            local d = t.directive
+            if d then
+                Bulletin(('   AI Emri: Sizma=%s | LEO=%s | Kayip=%s'):format(
+                    d.sneak_mode and 'AKTIF' or 'PASIF',
+                    TEAM_ENGAGEMENT_LABELS[d.lspd_engagement] or tostring(d.lspd_engagement),
+                    (d.casualty_protocol == 'carry') and 'TASI' or 'DELIL-KARART'))
+            else
+                Bulletin('   AI Emri: HENUZ VERILMEDI (/timeemir ile gonderin)')
+            end
+            for _, m in ipairs(t.members or {}) do
+                Bulletin(('   Bot #%s [%s] durum:%s%s'):format(
+                    tostring(m.bot_id), tostring(m.name or '?'), tostring(m.status or '?'),
+                    m.panicking and ' -- PANIK/EMIR-REDDI' or ''))
+            end
+        end
+    end
+end
+
+local function OpenTacticalCommandMenu()
+    Bulletin('========== TAKTIK KOMUTA MENUSU ==========')
+    Bulletin(('-- CANLI KADRO (%d/%d aktif takipci) --'):format(#Followers, Config.Mercenary.MaxFollowers or 2))
+
+    if #Followers == 0 then
+        Bulletin('   Aktif takipci yok (/muhafizcagir ile cagirin).')
+    else
+        local playerCoords = GetEntityCoords(PlayerPedId())
+        for _, entry in ipairs(Followers) do
+            if entry.ped and DoesEntityExist(entry.ped) then
+                local dist = #(GetEntityCoords(entry.ped) - playerCoords)
+                local mode = (entry.state and entry.state.current_task_mode) or 'follow'
+                Bulletin(('   Bot #%s | Mod:%s | Mesafe:%.1fm'):format(tostring(entry.botId), mode, dist))
+            end
+        end
+    end
+
+    PrintTeamReport()
+    Bulletin('===========================================')
+end
+
+RegisterCommand('matrixf10', function()
+    OpenTacticalCommandMenu()
+end, false)
+
+-- ★ [F10] Kaydin/keymapping'in kesin tetiklenmesi icin (talep edilen
+-- disiplin) onClientResourceStart icine ALINDI -- YALNIZCA BU
+-- KAYNAGIN kendi baslangicinda (GetCurrentResourceName() == resourceName
+-- guard'i, bu dosyanin/kod tabaninin HER YERDE kullandigi AYNI desen)
+-- calisir; guardsiz birakilsaydi HER kaynak baslangicinda yeniden
+-- tetiklenip gereksiz/duplicate kayit denemesi yapardi.
+AddEventHandler('onClientResourceStart', function(resourceName)
+    if GetCurrentResourceName() ~= resourceName then return end
+    RegisterKeyMapping('matrixf10', 'Taktik Komuta Menusu', 'keyboard', 'F10')
+end)
+
+
+-- =====================================================================
 -- ARAÇ KOMUTU: oyuncu bir araca binince, BOŞ koltuklara TaskEnterVehicle
 -- ile OTONOM binerler.
 -- =====================================================================
