@@ -205,17 +205,37 @@ end)
 local SplinterCells = {} -- [id] = { id, parent_hub_id, trap_house_id, splinter_index, coords, active }
 local nextSplinterId = 1
 
-local function PersistSplinterCell(cell)
-    MySQL.insert([[
-        INSERT INTO matrix_splinter_cells
-            (parent_hub_id, trap_house_id, splinter_index, coord_x, coord_y, coord_z, active, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
-    ]], {
-        cell.parent_hub_id, cell.trap_house_id, cell.splinter_index,
-        cell.coords.x, cell.coords.y, cell.coords.z, cell.active and 1 or 0
-    }, function(insertId)
-        if insertId then cell.db_id = insertId end
-    end)
+--- ★ [FIX] Tekil satir MySQL.insert artik dongu ICINDE cagrilmiyor -- bir
+--- parcalanma olayindaki TUM Alt Hucre satirlari (Config.DistrictHubs'a
+--- gore en fazla 2-3) tek bir MySQL.transaction.await ile ATOMIK olarak
+--- yazilir (Rule #2: explicit transaction, kismi yazim YOK). Eskiden
+--- PersistSplinterCell'in insertId callback'i cell.db_id'ye yaziyordu --
+--- bu alan hicbir yerde OKUNMUYORDU, bu yuzden batch'e gecerken guvenle
+--- dusuruldu.
+local function PersistSplinterCellsBatch(cells)
+    if #cells == 0 then return true end
+
+    local queries = {}
+    for _, cell in ipairs(cells) do
+        queries[#queries + 1] = {
+            query = [[
+                INSERT INTO matrix_splinter_cells
+                    (parent_hub_id, trap_house_id, splinter_index, coord_x, coord_y, coord_z, active, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+            ]],
+            values = {
+                cell.parent_hub_id, cell.trap_house_id, cell.splinter_index,
+                cell.coords.x, cell.coords.y, cell.coords.z, cell.active and 1 or 0
+            }
+        }
+    end
+
+    local ok, result = pcall(function() return MySQL.transaction.await(queries) end)
+    if not ok or result == false then
+        Matrix.Log('DISTRICT_HUB', '[HATA] PersistSplinterCellsBatch transaction basarisiz: %s', tostring(result))
+        return false
+    end
+    return true
 end
 
 function Matrix.DistrictHubs.FragmentTerritory(trapHouseId, deadLeaderBotId)
@@ -226,6 +246,7 @@ function Matrix.DistrictHubs.FragmentTerritory(trapHouseId, deadLeaderBotId)
     local splinterCount = (trapHouseId % 2 == 0) and 2 or 3
 
     local fragmentedHubs = 0
+    local newCells = {}
     for hubId, hub in pairs(Hubs) do
         if hub.trap_house_id == trapHouseId and hub.active then
             hub.active = false
@@ -243,10 +264,12 @@ function Matrix.DistrictHubs.FragmentTerritory(trapHouseId, deadLeaderBotId)
                 }
                 nextSplinterId = nextSplinterId + 1
                 SplinterCells[cell.id] = cell
-                PersistSplinterCell(cell)
+                newCells[#newCells + 1] = cell
             end
         end
     end
+
+    PersistSplinterCellsBatch(newCells)
 
     Matrix.Log('DISTRICT_HUB',
         '[FRAGMENTATION] Cete lideri Bot #%s dustu (Trap #%d) -- %d hub parcalandi, %dx Alt Hucre (Splinter Cell) uretildi (0-RNG: %s).',

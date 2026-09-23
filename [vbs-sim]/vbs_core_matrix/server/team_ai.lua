@@ -51,6 +51,25 @@ function Matrix.TeamAI.BroadcastToCommandAuthority(message, excludeSrc)
     end
 end
 
+--- ★ Salt-okunur getter: bir timdeki TUM bot id'lerini KUCUKTEN BUYUGE
+--- siralanmis dondurur -- ids[1] HER ZAMAN o timin lideridir.
+--- [FIX] BuildTeamCommandReport (asagida) BUNU cagirir -- bu yuzden
+--- ONCE tanimlanmasi ZORUNLUDUR (aksi halde 'local function' henuz
+--- kapsamda olmadigindan cagri GLOBAL bir nil'e duser ve callback
+--- 'attempt to call a nil value' ile patlar).
+local function GetTeamBotIds(team)
+    local ids = {}
+    for id, bot in pairs(Matrix.Bots) do
+        if bot.state and bot.state.team == team then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    return ids
+end
+
+function Matrix.TeamAI.GetTeamLeaderId(team)
+    return GetTeamBotIds(team)[1]
+end
+
 --- ★ Salt-okunur getter: F6/K panelinin (client/hud.lua) Co-Op'ta TAM
 --- senkronize gorebilmesi icin -- hangi tim, hangi OpenAI gorev kodunu
 --- (sneak_mode/lspd_engagement/casualty_protocol) yurutuyor ve lideri
@@ -86,21 +105,6 @@ lib.callback.register('matrix:callback:getTeamCommandReport', function(src)
     if not HasCommandAuthority(src) then return {} end
     return BuildTeamCommandReport()
 end)
-
---- ★ Salt-okunur getter: bir timdeki TUM bot id'lerini KUCUKTEN BUYUGE
---- siralanmis dondurur -- ids[1] HER ZAMAN o timin lideridir.
-local function GetTeamBotIds(team)
-    local ids = {}
-    for id, bot in pairs(Matrix.Bots) do
-        if bot.state and bot.state.team == team then ids[#ids + 1] = id end
-    end
-    table.sort(ids)
-    return ids
-end
-
-function Matrix.TeamAI.GetTeamLeaderId(team)
-    return GetTeamBotIds(team)[1]
-end
 
 -- =====================================================================
 -- ★ /timata [botId] [alfa|bravo] -- rutbeli subaylarin (Config.Hierarchy.

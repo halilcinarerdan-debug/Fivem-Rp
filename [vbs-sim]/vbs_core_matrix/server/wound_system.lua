@@ -239,6 +239,18 @@ function Matrix.Wounds.ApplyBotRegionalDamage(botId, rawDamage, forcedZone)
                 if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
                     local ok = pcall(TaskPutPedDirectlyIntoVehicle, casualtyPed, vehicle, -1)
                     Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "carry" emriyle araca yuklendi (basarili:%s).', botId, tostring(ok))
+
+                    -- ★ [FIX] CASEVAC sirasinda yarali botun kanamasi
+                    -- aracin ic mekanina/bagajina bulasir -- Matrix.
+                    -- Forensics.RecordBloodEvidence (MODUL 2 ile AYNI
+                    -- fonksiyon) aracin KENDI koordinatinda EK bir
+                    -- biological_blood satiri isler -- ikinci bir "kan
+                    -- delili" yolu ICAT EDILMEZ.
+                    if ok and Matrix.Forensics and type(Matrix.Forensics.RecordBloodEvidence) == 'function' then
+                        local vehCoords = GetEntityCoords(vehicle)
+                        local cortisol = bot.biology and bot.biology.cortisol_level or 0.0
+                        pcall(Matrix.Forensics.RecordBloodEvidence, bot.dna_id or 'UNKNOWN', 'CASEVAC', vehCoords, cortisol, 0.0)
+                    end
                 end
             elseif protocol == 'purge_evidence' and casualtyPed and casualtyPed ~= 0 and DoesEntityExist(casualtyPed) then
                 local coords = GetEntityCoords(casualtyPed)

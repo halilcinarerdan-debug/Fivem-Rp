@@ -263,11 +263,18 @@ RegisterKeyMapping('muhafiztaktik', 'Muhafiz Taktik Modu Ata: hold/guard/observe
 --- ★ [MODUL 13] Server'in ONAYLADIGI netId listesine gore MODU UYGULAR
 --- (idempotent ankraj/heading mantigi MODUL 11 ile AYNI); reddedilenler
 --- icin telsiz bulteni basar.
-RegisterNetEvent('matrix:client:mercenary:taskModeApproved', function(mode, approvedNetIds, rejections)
+--- ★ [FIX] remoteAnchor: HQ Baronu (server/mercenary_followers.lua
+--- remoteCommand) UZAKTAN hold/guard/observe emri verdiginde, komutu
+--- ALAN bu client (botun SAHIBI) kendi PlayerPedId()'sini degil, emri
+--- VEREN Baronun o anki koordinatini/baktigi yonu ankraj olarak
+--- kullanir -- YEREL /muhafiztaktik emrinde (remoteAnchor=nil) davranis
+--- DEGISMEZ.
+RegisterNetEvent('matrix:client:mercenary:taskModeApproved', function(mode, approvedNetIds, rejections, remoteAnchor)
     if not VALID_TASK_MODES[mode] then return end
 
     local playerPed     = PlayerPedId()
-    local playerHeading = GetEntityHeading(playerPed)
+    local anchorCoords   = remoteAnchor and remoteAnchor.coords or nil
+    local playerHeading  = (remoteAnchor and remoteAnchor.heading) or GetEntityHeading(playerPed)
     local isAnchorMode  = (mode == 'hold' or mode == 'guard' or mode == 'observe')
 
     local approvedSet = {}
@@ -284,9 +291,11 @@ RegisterNetEvent('matrix:client:mercenary:taskModeApproved', function(mode, appr
                 entry.state.anchored          = false
 
                 if isAnchorMode then
-                    -- ★ Ankraj = emrin verildigi ANDAKI ped konumu; heading =
-                    -- emrin verildigi ANDAKI oyuncunun baktigi yon.
-                    entry.state.last_assigned_coords  = GetEntityCoords(entry.ped)
+                    -- ★ Ankraj = emrin verildigi ANDAKI ped konumu (YEREL emir)
+                    -- veya Baronun UZAKTAN emir anindaki koordinati
+                    -- (remoteAnchor.coords, MODUL 15/16 HQ komutasi); heading =
+                    -- emri veren tarafin O ANDAKI baktigi yon.
+                    entry.state.last_assigned_coords  = anchorCoords or GetEntityCoords(entry.ped)
                     entry.state.last_assigned_heading = playerHeading
                 else
                     entry.state.last_assigned_coords  = nil
@@ -364,6 +373,71 @@ RegisterCommand('turnikeuygula', function()
     TriggerServerEvent('matrix:server:wounds:applyTourniquet', botId)
 end, false)
 RegisterKeyMapping('turnikeuygula', 'Yakindaki Yarali Takipciye Taktik Turnike Uygula ([Y] - F10 icinden de erisilebilir)', 'keyboard', 'Y')
+
+
+-- =====================================================================
+-- ★ [FIX] G/H KISAYOL TUS ATAMALARI: Tim Alfa/Bravo atama (G, server/
+-- team_ai.lua /timata) ve OpenAI HQ tim emri (H, /timeemir) icin
+-- lib.inputDialog + KATI sanitizasyon -- client/hud.lua'nin [S1]
+-- disiplini ile AYNI: bosluk/quote/semicolon/newline ICEREN hicbir
+-- girdi ExecuteCommand'a ULASMAZ, komuta gecmeden SESSIZCE REDDEDILIR.
+-- =====================================================================
+local function SanitizeFreeText(raw, maxLen)
+    if type(raw) ~= 'string' then return nil end
+    if raw:find('[;"\'\n\r]') then return nil end
+    raw = raw:gsub('^%s+', ''):gsub('%s+$', '')
+    if raw == '' or #raw > (maxLen or 200) then return nil end
+    return raw
+end
+
+local TEAM_SELECT_OPTIONS = {
+    { value = 'alfa',  label = 'Tim Alfa' },
+    { value = 'bravo', label = 'Tim Bravo' }
+}
+
+RegisterCommand('timataac', function()
+    local botId = FindNearestFollowerBotId(10.0)
+    if not botId then
+        if lib and lib.notify then
+            lib.notify({ title = '[TIM ATA]', description = 'Yakinda atanabilecek bir takipci yok.', type = 'error' })
+        end
+        return
+    end
+
+    local input = lib.inputDialog and lib.inputDialog('Tim Ata (G)', {
+        { type = 'select', label = 'Tim', required = true, options = TEAM_SELECT_OPTIONS }
+    })
+    if not input or not input[1] then return end
+
+    local team = tostring(input[1])
+    if team ~= 'alfa' and team ~= 'bravo' then return end
+
+    ExecuteCommand(('timata %d %s'):format(botId, team))
+end, false)
+RegisterKeyMapping('timataac', 'Yakindaki Takipciyi Tim Alfa/Bravo Icin Ata ([G] - F10 icinden de erisilebilir)', 'keyboard', 'G')
+
+
+RegisterCommand('timeemirac', function()
+    local input = lib.inputDialog and lib.inputDialog('HQ Tim Emri (OpenAI)', {
+        { type = 'select', label = 'Tim', required = true, options = TEAM_SELECT_OPTIONS },
+        { type = 'input',  label = 'Serbest Metin Talimat', required = true }
+    })
+    if not input or not input[1] or not input[2] then return end
+
+    local team = tostring(input[1])
+    if team ~= 'alfa' and team ~= 'bravo' then return end
+
+    local order = SanitizeFreeText(input[2], 400)
+    if not order then
+        if lib and lib.notify then
+            lib.notify({ title = '[TIM EMRI]', description = 'Gecersiz talimat metni (quote/semicolon/newline icermemeli).', type = 'error' })
+        end
+        return
+    end
+
+    ExecuteCommand(('timeemir %s %s'):format(team, order))
+end, false)
+RegisterKeyMapping('timeemirac', 'HQ Tim Emri Panelini Ac (OpenAI) ([H] - F10 icinden de erisilebilir)', 'keyboard', 'H')
 
 
 -- =====================================================================

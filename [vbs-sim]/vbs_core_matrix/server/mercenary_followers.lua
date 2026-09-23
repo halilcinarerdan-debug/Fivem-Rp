@@ -379,7 +379,22 @@ RegisterNetEvent('matrix:server:mercenary:remoteCommand', function(targetBotId, 
     local ownerSrc = bot.state and bot.state.assigned_src
     local netId    = bot.state and bot.state.net_id
     if ownerSrc and type(netId) == 'number' and netId > 0 then
-        TriggerClientEvent('matrix:client:mercenary:taskModeApproved', ownerSrc, mode, { netId }, {})
+        -- ★ [FIX] hold/guard/observe UZAKTAN atandiginda, komutu veren
+        -- rutbelinin O ANKI canli koordinati/baktigi yon ankraj olarak
+        -- mühürlenir ve botun SAHIBI OLAN client'a iletilir -- aksi halde
+        -- o client kendi PlayerPedId()'sini (Baron degil, botun sahibi)
+        -- ankraj sanip yanlis noktaya kilitlerdi.
+        local remoteAnchor = nil
+        if mode == 'hold' or mode == 'guard' or mode == 'observe' then
+            local commanderPed = GetPlayerPed(src)
+            if commanderPed and commanderPed ~= 0 then
+                remoteAnchor = {
+                    coords  = GetEntityCoords(commanderPed),
+                    heading = GetEntityHeading(commanderPed)
+                }
+            end
+        end
+        TriggerClientEvent('matrix:client:mercenary:taskModeApproved', ownerSrc, mode, { netId }, {}, remoteAnchor)
     end
 end)
 
