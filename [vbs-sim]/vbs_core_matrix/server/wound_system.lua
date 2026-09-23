@@ -237,8 +237,28 @@ function Matrix.Wounds.ApplyBotRegionalDamage(botId, rawDamage, forcedZone)
                 local vehNetId = dispatch.vehicle_net_id
                 local vehicle = (type(vehNetId) == 'number' and vehNetId > 0) and NetworkGetEntityFromNetworkId(vehNetId) or nil
                 if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
-                    local ok = pcall(TaskPutPedDirectlyIntoVehicle, casualtyPed, vehicle, -1)
-                    Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "carry" emriyle araca yuklendi (basarili:%s).', botId, tostring(ok))
+                    -- ★ [FIX] 'TaskPutPedDirectlyIntoVehicle' GERCEK BIR
+                    -- NATIVE DEGIL -- server tarafinda GLOBAL olarak
+                    -- TANIMSIZ, cagrildiginda 'attempt to call a nil
+                    -- value' hatasiyla bu casualty-protocol dali cokerdi.
+                    -- Dogrulanmis, hem client hem server RPC olarak
+                    -- MEVCUT olan SetPedIntoVehicle (aninda/animasyonsuz
+                    -- yerlestirme -- baygin bir bot icin dogru semantik)
+                    -- ile degistirildi. ★ [FIX-2] Bos koltuk aramak icin
+                    -- GetVehicleMaxNumberOfPassengers/IsVehicleSeatFree
+                    -- CLIENT-ONLY'dir (server tarafinda YOKTUR) --
+                    -- bunlarin YERINE server-safe GetPedInVehicleSeat
+                    -- (bos koltukta 0 doner) ile sabit bir arama araligi
+                    -- (0..7, tipik yolcu/arac kapasitesini kapsar)
+                    -- taranir; hicbiri bos degilse surucu koltugu (-1)
+                    -- kullanilir.
+                    local seat = -1
+                    for s = 0, 7 do
+                        if GetPedInVehicleSeat(vehicle, s) == 0 then seat = s; break end
+                    end
+
+                    local ok = pcall(SetPedIntoVehicle, casualtyPed, vehicle, seat)
+                    Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "carry" emriyle araca yuklendi (koltuk:%d, basarili:%s).', botId, seat, tostring(ok))
 
                     -- ★ [FIX] CASEVAC sirasinda yarali botun kanamasi
                     -- aracin ic mekanina/bagajina bulasir -- Matrix.

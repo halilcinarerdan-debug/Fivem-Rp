@@ -60,8 +60,13 @@ CreateThread(function()
         local now = GetGameTimer()
 
         -- --- Strafe-yön-tersine-çevirme (sprint/havada) ---
+        -- ★ [FIX] 'IsPedOnGround' GTA V/FiveM'de GERCEK BIR NATIVE DEGIL --
+        -- global olarak TANIMSIZ, cagrildiginda 'attempt to call a nil
+        -- value' hatasiyla BU THREAD coker (diger thread'ler/HUD/F10
+        -- ETKILENMEZ, ama bu strafe-tespiti tamamen devre disi kalirdi).
+        -- Dogrulanmis RAGE native'i IsEntityInAir ile degistirildi.
         local sprinting = IsPedSprinting(ped)
-        local airborne  = IsPedFalling(ped) or IsPedJumping(ped) or not IsPedOnGround(ped)
+        local airborne  = IsPedFalling(ped) or IsPedJumping(ped) or IsEntityInAir(ped)
 
         if sprinting or airborne then
             local lateral = GetControlNormal(0, 30) -- INPUT_MOVE_LR

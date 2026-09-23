@@ -89,31 +89,52 @@ function Matrix.PhoneBridge.TransmitMissionTelemetry(botSnapshot, statusLabel, d
 
     -- Asenkron fırlat — çağıran thread'i ASLA bloklamaz.
     CreateThread(function()
-        -- qb-phone canonical
-        pcall(function()
-            TriggerEvent('qb-phone:server:sendNewMail', dispatcherSrc, {
-                sender  = 'DARKCHAT // ENCRYPTED',
-                subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
-                message = message,
-                button  = {}
-            })
-        end)
-        -- qb-phone fork: direct export
-        pcall(function()
-            exports['qb-phone']:sendNewMail(dispatcherSrc, {
-                sender  = 'DARKCHAT // ENCRYPTED',
-                subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
-                message = message
-            })
-        end)
-        -- lb-phone fork
-        pcall(function()
-            exports['lb-phone']:SendMail(dispatcherSrc, {
-                sender  = 'darkchat@matrix.local',
-                subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
-                message = message
-            })
-        end)
+        -- ★ [FIX] GEVSEK BAGLANTI (LOOSE COUPLING): qb-phone/lb-phone
+        -- HANGISI KURULU/BASLATILMIS ise (GetResourceState == 'started')
+        -- SADECE ona mail gonderilmeye calisilir -- her ikisi de yoksa
+        -- (bagimsiz sunucu kurulumu) TEK BIR net log basilir ve akis
+        -- (asagidaki darkchat client kopru event'i DAHIL) KESINTISIZ
+        -- devam eder. Not: bu blok zaten HER dalinda pcall'lu ve kendi
+        -- CreateThread'inde -- eksik bir telefon kaynagi daha ONCE de
+        -- HUD snapshot push mekanizmasini KILITLEMIYORDU; bu guard
+        -- yalnizca konsolu netlestirir/gereksiz basarisiz cagrilari
+        -- ONLER.
+        local qbPhoneStarted = GetResourceState('qb-phone') == 'started'
+        local lbPhoneStarted = GetResourceState('lb-phone') == 'started'
+
+        if not qbPhoneStarted and not lbPhoneStarted then
+            Matrix.Log('PHONE_BRIDGE', '[PHONE_BRIDGE] qb-phone/lb-phone bulunamadi, mail telemetrisi yutuldu, siber kancalar safe-mode ile devam ediyor.')
+        end
+
+        if qbPhoneStarted then
+            -- qb-phone canonical
+            pcall(function()
+                TriggerEvent('qb-phone:server:sendNewMail', dispatcherSrc, {
+                    sender  = 'DARKCHAT // ENCRYPTED',
+                    subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
+                    message = message,
+                    button  = {}
+                })
+            end)
+            -- qb-phone fork: direct export
+            pcall(function()
+                exports['qb-phone']:sendNewMail(dispatcherSrc, {
+                    sender  = 'DARKCHAT // ENCRYPTED',
+                    subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
+                    message = message
+                })
+            end)
+        end
+
+        if lbPhoneStarted then
+            pcall(function()
+                exports['lb-phone']:SendMail(dispatcherSrc, {
+                    sender  = 'darkchat@matrix.local',
+                    subject = ('AJAN TELEMETRİSİ #%d'):format(tonumber(botSnapshot.id) or 0),
+                    message = message
+                })
+            end)
+        end
         -- darkchat alt-uygulama köprüsü (client tarafı)
         pcall(function()
             TriggerClientEvent('matrix:client:darkchat:telemetry', dispatcherSrc, {

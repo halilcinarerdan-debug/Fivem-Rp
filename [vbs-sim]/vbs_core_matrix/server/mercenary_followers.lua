@@ -32,6 +32,25 @@ local FollowerNetIds = {}
 -- SpawnBot ile ayni networked-ped yolu) cagirir. Havuzda uygun ajan yoksa
 -- cagri REDDEDILIR -- hicbir yeni kimlik/entity uretilmez.
 -- =====================================================================
+-- ★ [FIX] GetOffsetFromEntityInWorldCoords bir CLIENT-ONLY native'dir --
+-- server tarafinda GLOBAL olarak TANIMSIZ, cagrildiginda 'attempt to
+-- call a nil value' hatasiyla /muhafizcagir COKERDI (bot hicbir zaman
+-- sahaya inemezdi). Yerine, Cfx.re topluluğunun dogruladigi standart
+-- server-safe 2D rotasyon matrisi ile AYNI sonucu ureten deterministik
+-- bir yardimci fonksiyon (RNG YOK, salt trigonometri).
+local function ServerSideOffsetFromEntity(ped, localOffsetX, localOffsetY, localOffsetZ)
+    local coords  = GetEntityCoords(ped)
+    local heading = GetEntityHeading(ped) or 0.0
+    local rad     = math.rad(heading)
+    local cosH, sinH = math.cos(rad), math.sin(rad)
+
+    return vector3(
+        coords.x + (localOffsetX * cosH) - (localOffsetY * sinH),
+        coords.y + (localOffsetX * sinH) + (localOffsetY * cosH),
+        coords.z + (localOffsetZ or 0.0)
+    )
+end
+
 local function FindDeployableOwnedBot(citizenid)
     if type(citizenid) ~= 'string' or citizenid == '' then return nil end
 
@@ -84,7 +103,7 @@ function Matrix.Mercenary.RequestSummon(src)
 
     local heading    = GetEntityHeading(ped)
     local offset     = (current + 1) * (Config.Mercenary.SummonRadius or 3.0)
-    local spawnCoords = GetOffsetFromEntityInWorldCoords(ped, (current == 0) and 1.0 or -1.0, -offset, 0.0)
+    local spawnCoords = ServerSideOffsetFromEntity(ped, (current == 0) and 1.0 or -1.0, -offset, 0.0)
     local spawnVec4  = vector4(spawnCoords.x, spawnCoords.y, spawnCoords.z, heading)
 
     -- Zaten sahadaysa (baska bir yerde deploy edilmisti) once cekilir;
