@@ -135,13 +135,13 @@ function Matrix.MarkBotDirty(botId)
     if botId then P.dirtyBots[botId] = true end
 end
 
-local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
+local BOT_ROW_SQL = '(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())'
 local BOT_UPSERT_HEAD =
     'INSERT INTO matrix_bots (id, dna_id, name, role, status, handler_citizenid, ' ..
     'fear_factor, resilience, snitch_tendency, economic_pressure, cognitive_shifter, skill_chemistry, ' ..
     'skill_cyber, skill_logistics, loyalty_base, ' ..
     'fatigue_level, cortisol_level, withdrawal_index, addiction_level, base_cortisol_recovery_rate, ' ..
-    'trap_house_id, updated_at) VALUES '
+    'trap_house_id, activity, updated_at) VALUES '
 local BOT_UPSERT_TAIL =
     ' ON DUPLICATE KEY UPDATE ' ..
     'name=VALUES(name), role=VALUES(role), status=VALUES(status), handler_citizenid=VALUES(handler_citizenid), ' ..
@@ -153,7 +153,7 @@ local BOT_UPSERT_TAIL =
     'fatigue_level=VALUES(fatigue_level), cortisol_level=VALUES(cortisol_level), ' ..
     'withdrawal_index=VALUES(withdrawal_index), addiction_level=VALUES(addiction_level), ' ..
     'base_cortisol_recovery_rate=VALUES(base_cortisol_recovery_rate), ' ..
-    'trap_house_id=VALUES(trap_house_id), updated_at=NOW()'
+    'trap_house_id=VALUES(trap_house_id), activity=VALUES(activity), updated_at=NOW()'
 
 local function BuildBotUpsert(botList)
     local n = #botList
@@ -187,6 +187,7 @@ local function BuildBotUpsert(botList)
         params[idx] = b.biology.addiction_level              ; idx = idx + 1
         params[idx] = b.biology.base_cortisol_recovery_rate  ; idx = idx + 1
         params[idx] = b.state.trap_house_id                  ; idx = idx + 1
+        params[idx] = b.state.activity or 'idle'              ; idx = idx + 1
     end
 
     local query = BOT_UPSERT_HEAD .. table.concat(rows, ',') .. BOT_UPSERT_TAIL
@@ -472,7 +473,13 @@ local function LoadBotsFromDatabase()
                 burned_this_episode       = false
             },
             state = {
-                activity        = 'idle',
+                -- ★ MODUL 1: 'deployed' olarak kalıcı hale getirilmiş satırlar
+                -- sunucu yeniden başladığında YANLIŞLIKLA 'idle' sayılıp aynı
+                -- anda iki oyuncuya cagrilamasin diye, DB'deki 'deployed'
+                -- deger korunur (ped zaten spawned=false donuyor -- fiilen
+                -- sahada degil ama sahibine ait olarak isaretli kalir; oyuncu
+                -- /muhafizsalla ile serbest birakabilir).
+                activity        = row.activity or 'idle',
                 trap_house_id   = row.trap_house_id,
                 coords          = nil,
                 spawned         = false,
@@ -1378,15 +1385,48 @@ function Matrix.TickPhysicalDispatches()
                         end
                     end
 
-                    if veryClose then
-                        dispatch.police_dwell = dispatch.police_dwell + 1
-                    else
-                        dispatch.police_dwell = math_max(0, dispatch.police_dwell - 1)
+                    -- =========================================================
+                    -- ★ [MODUL 15.2] LEO VETTING V2 -- OpenAI'in /timeemir ile
+                    -- atadigi dispatch.ai_fsm_matrix.lspd_engagement MEVCUTSA,
+                    -- deterministik olarak dallanir. Alan YOKSA (AI emri hic
+                    -- verilmemis) mevcut police_dwell/busted mantigi DEGISMEDEN
+                    -- calisir -- bu blok TAMAMEN ADDITIVE'dir.
+                    -- =========================================================
+                    if policeNearby and dispatch.ai_fsm_matrix then
+                        local engagement = dispatch.ai_fsm_matrix.lspd_engagement
+                        if engagement == 'flee' then
+                            Matrix.Log('CORE', '[LEO VETTING V2] Bot #%d -- AI emri "flee", panik geri cekilme tetiklendi.', botId)
+                            toComplete[botId] = 'panic_recall'
+                        elseif engagement == 'attack' and veryClose then
+                            local nearestOfficerPed, nearestOfficerDist = nil, math_huge
+                            for policeSrc in pairs(PoliceSources) do
+                                local officerPed = GetPlayerPed(policeSrc)
+                                if officerPed and officerPed ~= 0 then
+                                    local d = #(GetEntityCoords(officerPed) - coords)
+                                    if d < nearestOfficerDist then
+                                        nearestOfficerPed, nearestOfficerDist = officerPed, d
+                                    end
+                                end
+                            end
+                            if nearestOfficerPed then
+                                pcall(TaskCombatPed, ped, nearestOfficerPed, 0, 16)
+                            end
+                        end
+                    end
+
+                    if not toComplete[botId] then
+                        if veryClose then
+                            dispatch.police_dwell = dispatch.police_dwell + 1
+                        else
+                            dispatch.police_dwell = math_max(0, dispatch.police_dwell - 1)
+                        end
                     end
 
                     if dispatch.police_dwell >= DISPATCH_BUSTED_DWELL_TICKS then
                         Matrix.Log('CORE', '[PUSU] Bot #%d polis tarafından kuşatıldı.', botId)
-                        toComplete[botId] = 'busted'
+                        -- ★ [MODUL 15.2] AI'in bu tick'te ZATEN atadigi bir
+                        -- tamamlama sebebini (orn. 'panic_recall') EZMEZ.
+                        toComplete[botId] = toComplete[botId] or 'busted'
                     else
                         if dispatch.plate then
                             for trapId, trapHouse in pairs(Matrix.TrapHouses or {}) do

@@ -218,6 +218,69 @@ function Matrix.Wounds.ApplyBotRegionalDamage(botId, rawDamage, forcedZone)
         Matrix.Log('WOUNDS',
             '[GOVDE YARASI] Bot #%d -- kortizol kilitli, denetim anomali +%%%d, stash hirsizligi tetiklendi.',
             botId, math_floor(((Config.BotWounds.TorsoAuditAnomalyMultiplier or 3.0) - 1.0) * 100))
+
+        -- =================================================================
+        -- ★ [MODUL 15.2] KAYIP VE KANIT KARARTMA PROTOKOLU (Casualty
+        -- Protocol) -- gövde yarasi (bu bot "yere yigildi") ANINDA, AKTIF
+        -- bir sevkte (Matrix.Dispatches[botId]) OpenAI'in /timeemir ile
+        -- atadigi dispatch.ai_fsm_matrix.casualty_protocol MEVCUTSA
+        -- deterministik olarak dallanir -- alan YOKSA (AI emri hic
+        -- verilmemis) HICBIR SEY DEGISMEZ (TAMAMEN ADDITIVE).
+        -- =================================================================
+        local dispatch = Matrix.Dispatches and Matrix.Dispatches[botId]
+        if dispatch and dispatch.ai_fsm_matrix then
+            local protocol = dispatch.ai_fsm_matrix.casualty_protocol
+            local netId = bot.state and bot.state.net_id
+            local casualtyPed = (type(netId) == 'number' and netId > 0) and NetworkGetEntityFromNetworkId(netId) or nil
+
+            if protocol == 'carry' and casualtyPed and casualtyPed ~= 0 and DoesEntityExist(casualtyPed) then
+                local vehNetId = dispatch.vehicle_net_id
+                local vehicle = (type(vehNetId) == 'number' and vehNetId > 0) and NetworkGetEntityFromNetworkId(vehNetId) or nil
+                if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+                    -- ★ [FIX] 'TaskPutPedDirectlyIntoVehicle' GERCEK BIR
+                    -- NATIVE DEGIL -- server tarafinda GLOBAL olarak
+                    -- TANIMSIZ, cagrildiginda 'attempt to call a nil
+                    -- value' hatasiyla bu casualty-protocol dali cokerdi.
+                    -- Dogrulanmis, hem client hem server RPC olarak
+                    -- MEVCUT olan SetPedIntoVehicle (aninda/animasyonsuz
+                    -- yerlestirme -- baygin bir bot icin dogru semantik)
+                    -- ile degistirildi. ★ [FIX-2] Bos koltuk aramak icin
+                    -- GetVehicleMaxNumberOfPassengers/IsVehicleSeatFree
+                    -- CLIENT-ONLY'dir (server tarafinda YOKTUR) --
+                    -- bunlarin YERINE server-safe GetPedInVehicleSeat
+                    -- (bos koltukta 0 doner) ile sabit bir arama araligi
+                    -- (0..7, tipik yolcu/arac kapasitesini kapsar)
+                    -- taranir; hicbiri bos degilse surucu koltugu (-1)
+                    -- kullanilir.
+                    local seat = -1
+                    for s = 0, 7 do
+                        if GetPedInVehicleSeat(vehicle, s) == 0 then seat = s; break end
+                    end
+
+                    local ok = pcall(SetPedIntoVehicle, casualtyPed, vehicle, seat)
+                    Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "carry" emriyle araca yuklendi (koltuk:%d, basarili:%s).', botId, seat, tostring(ok))
+
+                    -- ★ [FIX] CASEVAC sirasinda yarali botun kanamasi
+                    -- aracin ic mekanina/bagajina bulasir -- Matrix.
+                    -- Forensics.RecordBloodEvidence (MODUL 2 ile AYNI
+                    -- fonksiyon) aracin KENDI koordinatinda EK bir
+                    -- biological_blood satiri isler -- ikinci bir "kan
+                    -- delili" yolu ICAT EDILMEZ.
+                    if ok and Matrix.Forensics and type(Matrix.Forensics.RecordBloodEvidence) == 'function' then
+                        local vehCoords = GetEntityCoords(vehicle)
+                        local cortisol = bot.biology and bot.biology.cortisol_level or 0.0
+                        pcall(Matrix.Forensics.RecordBloodEvidence, bot.dna_id or 'UNKNOWN', 'CASEVAC', vehCoords, cortisol, 0.0)
+                    end
+                end
+            elseif protocol == 'purge_evidence' and casualtyPed and casualtyPed ~= 0 and DoesEntityExist(casualtyPed) then
+                local coords = GetEntityCoords(casualtyPed)
+                local collectOk = pcall(Matrix.Forensics.CollectShells, botId, coords)
+                Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "purge_evidence" emriyle olay yeri kazindi (basarili:%s), otonom kacis.', botId, tostring(collectOk))
+                if Matrix.CompleteDispatch then
+                    pcall(Matrix.CompleteDispatch, botId, 'panic_recall')
+                end
+            end
+        end
     end
 
     Matrix.Wounds.Bots[botId] = w
@@ -444,14 +507,51 @@ AddEventHandler('playerDropped', function()
 end)
 
 -- =====================================================================
--- [KATMAN 2] OYUNCU-HASAR KANCA
+-- MODUL 2: MELEE/BIÇAK SILAH HASH SETI (RNG YOK -- sabit ad listesinden
+-- GetHashKey ile bir kez turetilir, sonra tostring(hash) karsilastirilir --
+-- client'in TriggerServerEvent'e AYNEN gönderdiği format budur, bkz.
+-- client/hud.lua: weaponHashStr = tostring(weaponHash)).
 -- =====================================================================
-RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId, attackerWeaponHash)
-    local src = source
+local MeleeWeaponHashSet = {}
+for _, weaponName in ipairs(Config.Forensics.MeleeWeaponNames or {}) do
+    MeleeWeaponHashSet[tostring(GetHashKey(weaponName))] = true
+end
+
+-- =====================================================================
+-- [KATMAN 2] OYUNCU-HASAR KANCA
+--
+-- ★ [MODUL 14.2] TEK YETKILI ProcessWoundReport: hem canli event'ten
+-- (isDelayed=false) hem de client/hud.lua LocalAdliBuffer'inin agir
+-- baglanti kesintisi sonrasi gonderdigi 'Delayed Batch Sync' paketinden
+-- (isDelayed=true, originalTs = client'in o anki os.time() damgasi)
+-- CAGRILIR -- ikinci bir "hasar isleme" yolu ICAT EDILMEZ. Zaman damgasi
+-- gecmise donuk olsa dahi ayni ACID INSERT/UPDATE disiplini uygulanir.
+-- =====================================================================
+local function ProcessWoundReport(src, attackerServerId, attackerWeaponHash, isDelayed, originalTs)
     if type(src) ~= 'number' or src <= 0 then return end
 
     local state = Matrix.GetOrCreatePlayerState(src)
     if not state or not state.citizenid then return end
+
+    -- ★ MODUL 2: melee/bicak hasari -> biological_blood adli kanit satiri.
+    if type(attackerWeaponHash) == 'string' and MeleeWeaponHashSet[attackerWeaponHash] then
+        attackerServerId = tonumber(attackerServerId)
+        local attackerState = (attackerServerId and attackerServerId > 0)
+            and Matrix.GetOrCreatePlayerState(attackerServerId) or nil
+        local attackerDnaId = (attackerState and attackerState.dna_id) or 'UNKNOWN'
+
+        local victimPed = GetPlayerPed(src)
+        local coords = (victimPed and victimPed ~= 0) and GetEntityCoords(victimPed) or nil
+
+        local cortisol = state.biology and state.biology.cortisol_level or 0.0
+        local fatigue   = state.biology and state.biology.fatigue_level  or 0.0
+
+        local ok, err = pcall(Matrix.Forensics.RecordBloodEvidence,
+            state.dna_id, attackerDnaId, coords, cortisol, fatigue)
+        if not ok then
+            Matrix.Log('WOUNDS', '[HATA] RecordBloodEvidence basarisiz (yutuldu): %s', tostring(err))
+        end
+    end
 
     local ballisticId = nil
 
@@ -477,8 +577,201 @@ RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId,
     state.has_wound          = true
     state.wound_ballistic_id = ballisticId
 
-    Matrix.Log('WOUNDS', '[YARALANMA] %s balistik-imza #%s ile yaralandi.', state.citizenid, tostring(ballisticId))
+    if isDelayed then
+        Matrix.Log('WOUNDS',
+            '[GECIKMELI ADLI IZ] %s balistik-imza #%s ile yaralandi (istemci zaman damgasi: %s, agir baglanti kesintisi sonrasi toplu senkron).',
+            state.citizenid, tostring(ballisticId), tostring(originalTs))
+    else
+        Matrix.Log('WOUNDS', '[YARALANMA] %s balistik-imza #%s ile yaralandi.', state.citizenid, tostring(ballisticId))
+    end
+end
+
+RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId, attackerWeaponHash)
+    local src = source
+    ProcessWoundReport(src, attackerServerId, attackerWeaponHash, false, nil)
 end)
+
+-- =====================================================================
+-- ★ [MODUL 14.2] GECIKMELI TOPLU SENKRON (Delayed Batch Sync) --
+-- client/hud.lua LocalAdliBuffer'inin (agir baglanti kesintisi/timeout
+-- riski sirasinda kordugu, FIFO + 32 paket tavanli) tampon icerigini
+-- ag hatti normale doner donmez TEK bir event ile gonderir. Her kayit
+-- BAGIMSIZ olarak, AYNI ProcessWoundReport disipliniyle (ACID insert/
+-- update) islenir -- kismi yazim YOK. RAM-bomb korumasi: 32 kayittan
+-- fazlasi (client tarafi zaten sinirlar, ama sunucu tarafi da GUVENMEZ)
+-- SESSIZCE KIRPILIR.
+-- =====================================================================
+local MAX_DELAYED_BATCH_RECORDS = 32
+
+RegisterNetEvent('matrix:server:reportPlayerWoundedBatch', function(records)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(records) ~= 'table' then return end
+
+    local processed = 0
+    for i, rec in ipairs(records) do
+        if i > MAX_DELAYED_BATCH_RECORDS then break end
+        if type(rec) == 'table' then
+            local ok, err = pcall(ProcessWoundReport, src, rec.attacker_server_id, rec.weapon_hash, true, rec.ts)
+            if ok then
+                processed = processed + 1
+            else
+                Matrix.Log('WOUNDS', '[HATA] Gecikmeli paket #%d islenemedi (yutuldu): %s', i, tostring(err))
+            end
+        end
+    end
+
+    if processed > 0 then
+        Matrix.Log('WOUNDS', '[GECIKMELI ADLI IZ] src=%d -- %d/%d tamponlanmis paket ACID butunlugu ile islendi.',
+            src, processed, math.min(#records, MAX_DELAYED_BATCH_RECORDS))
+    end
+end)
+
+-- =====================================================================
+-- MODUL 7: BASKI (SUPPRESSION) -> KORTİZOL ARTIŞI
+-- client/anti_glitch.lua yakın-ıskalama/ateş-hattı vekilini saniyede bir
+-- (SUPPRESSION_REPORT_MS) bu event ile bildirir. RNG YOK: sabit oran
+-- (~%10/sn tam bastırmada) intensity (0..1) ile DOĞRUSAL ölçeklenir.
+-- =====================================================================
+function Matrix.Wounds.ApplySuppressionCortisol(src, intensity)
+    if type(src) ~= 'number' or src <= 0 then return end
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if not state or not state.biology then return end
+
+    intensity = Matrix.Clamp(tonumber(intensity) or 0.0, 0.0, 1.0)
+    local delta = 0.10 * intensity -- ~%10/sn tam bastirmada (event ~1sn'de bir gelir)
+
+    state.biology.cortisol_level = Matrix.Clamp(state.biology.cortisol_level + delta, 0.0, 1.0)
+    TriggerClientEvent('matrix:client:cortisolSync', src, state.biology.cortisol_level)
+end
+
+RegisterNetEvent('matrix:server:reportSuppression', function(intensity)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local ok, err = pcall(Matrix.Wounds.ApplySuppressionCortisol, src, intensity)
+    if not ok then
+        Matrix.Log('WOUNDS', '[HATA] ApplySuppressionCortisol basarisiz (yutuldu): %s', tostring(err))
+    end
+end)
+
+-- =====================================================================
+-- ★ [MODUL 13.1] MUHAREBE STRESI (PANIK) VE EMIR REDDI
+-- Histerezis: bot.state.panicking=true iken cortisol_level Config.
+-- CombatPanic.CalmCortisolThreshold ALTINA dusmeden panicking=false
+-- OLMAZ -- RefusalCortisolThreshold'un ANLIK altina/ustune salinimi
+-- "yeniden itaat" SAYILMAZ (gorev talimati acikca boyle istiyor).
+-- server/mercenary_followers.lua taktik emir atamasindan ONCE bunu
+-- probe eder.
+-- =====================================================================
+function Matrix.Wounds.IsBotPanicking(botId)
+    local bot = Matrix.Bots[botId]
+    if not bot or not bot.biology then return false end
+
+    local cortisol = bot.biology.cortisol_level or 0.0
+    bot.state = bot.state or {}
+
+    if bot.state.panicking then
+        if cortisol < (Config.CombatPanic.CalmCortisolThreshold or 0.60) then
+            bot.state.panicking = false
+        end
+    else
+        if cortisol >= (Config.CombatPanic.RefusalCortisolThreshold or 0.85) then
+            bot.state.panicking = true
+        end
+    end
+
+    return bot.state.panicking == true
+end
+
+-- =====================================================================
+-- ★ [MODUL 13.3] TAKTIK TURNIKE PROTOKOLU
+-- Kompleks tibbi kit/igne YOK -- tek mudahale araci Config.
+-- TacticalTourniquet.Item. Agir uzuv hasari alan (leg_injury>0 veya
+-- arm_injury>0) bir bota, ApplyRadiusMeters icinden basarili mudahalede:
+--   * leg/arm_injury InjuryReductionPct ORANIYLA sonumlenir (kalici
+--     sakatlik esigine girme ihtimali dusurulur, TAMAMEN sifirlanmaz).
+--   * bot.state.panicking=false (emirlere yeniden itaat).
+--   * KOMA MODUNDAYSA (server/bureau.lua KOR NOKTA) Matrix.Bureau.
+--     ExtendComaClock ile deceased-arsivleme sayaci ERTELENIR -- koma
+--     IYILESTIRILMEZ (biz bir sagli ekibi degiliz).
+--   * ADLI IZ: tuketilen turnike kumasina bulasan kan icin EK, yuksek
+--     saflikli (cortisol=0,fatigue=0 -> purity=1.0, RNG YOK) bir
+--     biological_blood satiri (MODUL 2 ile AYNI RecordBloodEvidence).
+-- =====================================================================
+function Matrix.Wounds.ApplyTourniquet(src, botId)
+    if type(src) ~= 'number' or src <= 0 then return false, 'bad_src' end
+    botId = tonumber(botId)
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    local w = GetOrInitBotWound(botId)
+    local wasComatose = (bot.status == 'comatose')
+
+    if not wasComatose and w.leg_injury <= 0.0 and w.arm_injury <= 0.0 then
+        return false, 'no_wound'
+    end
+
+    local ped = GetPlayerPed(src)
+    local netId = bot.state and bot.state.net_id
+    local botPed = (type(netId) == 'number' and netId > 0) and NetworkGetEntityFromNetworkId(netId) or nil
+    if not ped or ped == 0 or not botPed or botPed == 0 or not DoesEntityExist(botPed) then
+        return false, 'not_nearby'
+    end
+
+    local dist = VectorDistance(GetEntityCoords(ped), GetEntityCoords(botPed))
+    if dist > (Config.TacticalTourniquet.ApplyRadiusMeters or 2.0) then
+        return false, 'not_nearby'
+    end
+
+    local removeOk, removeResult = pcall(function()
+        return exports['ox_inventory']:RemoveItem(src, Config.TacticalTourniquet.Item, 1)
+    end)
+    if not removeOk or removeResult ~= true then return false, 'item_missing' end
+
+    local pct = Matrix.Clamp(Config.TacticalTourniquet.InjuryReductionPct or 0.50, 0.0, 1.0)
+    w.leg_injury = Matrix.Clamp(w.leg_injury * (1.0 - pct), 0.0, 1.0)
+    w.arm_injury = Matrix.Clamp(w.arm_injury * (1.0 - pct), 0.0, 1.0)
+    PersistBotWound(botId, w)
+
+    bot.state = bot.state or {}
+    bot.state.panicking = false
+
+    local comaExtended = false
+    if wasComatose and Matrix.Bureau and type(Matrix.Bureau.ExtendComaClock) == 'function' then
+        local ok = Matrix.Bureau.ExtendComaClock(botId, Config.TacticalTourniquet.ComaExtensionSeconds or 7200)
+        comaExtended = (ok == true)
+    end
+
+    if Matrix.Forensics and type(Matrix.Forensics.RecordBloodEvidence) == 'function' then
+        local coords = GetEntityCoords(botPed)
+        pcall(Matrix.Forensics.RecordBloodEvidence, bot.dna_id or 'UNKNOWN', 'TOURNIQUET', coords, 0.0, 0.0)
+    end
+
+    Matrix.Log('WOUNDS', '[TURNIKE] src=%d bot #%d icin turnike uyguladi (koma-erteleme:%s).',
+        src, botId, tostring(comaExtended))
+    return true, comaExtended
+end
+
+RegisterNetEvent('matrix:server:wounds:applyTourniquet', function(botId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+
+    local ok, resultOrReason = Matrix.Wounds.ApplyTourniquet(src, botId)
+    if ok then
+        TriggerClientEvent('matrix:client:actionNotify', src, true, resultOrReason
+            and '[TURNIKE] Kanama durduruldu, koma sayaci ertelendi.'
+            or '[TURNIKE] Kanama durduruldu.')
+    else
+        local msg = (resultOrReason == 'no_wound') and 'Bu botun turnike gerektiren bir yarasi yok.'
+            or (resultOrReason == 'not_nearby') and 'Turnike icin bota daha yakin olmalisiniz.'
+            or (resultOrReason == 'item_missing') and 'Envanterinizde Taktik Turnike yok.'
+            or 'Turnike uygulanamadi.'
+        TriggerClientEvent('matrix:client:actionNotify', src, false, msg)
+    end
+end)
+
+exports('ApplyTourniquet', function(src, botId) return Matrix.Wounds.ApplyTourniquet(src, botId) end)
+exports('IsBotPanicking', function(botId) return Matrix.Wounds.IsBotPanicking(botId) end)
 
 -- =====================================================================
 -- [KATMAN 2] /tedaviol — Yasal Hastane Check-In + Adli Sorgu

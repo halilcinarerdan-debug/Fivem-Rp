@@ -1450,3 +1450,34 @@ CREATE TABLE IF NOT EXISTS `matrix_opsec_tamper_log` (
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;
+
+-- =====================================================================
+-- ★ KATMAN 9: TASK EKİ — ADLİ KAN DELİLİ + AJAN HAVUZU KALICILIĞI
+-- Bu blok TAMAMEN EKLEMEDİR. Hiçbir mevcut tablonun/kolonun tipi/anlamı
+-- DEĞİŞTİRİLMEDİ -- yalnızca ADD COLUMN IF NOT EXISTS kullanılır.
+-- =====================================================================
+
+-- [1] matrix_forensic_evidence.blood_pool_purity -- server/forensics.lua
+-- Matrix.Forensics.RecordBloodEvidence tarafından yazılan, biyolojik kan
+-- izinin (evidence_type='biological_blood') anlık saflığı. NULL == bu
+-- satır kan delili değil (mevcut kovan/mermi satırları etkilenmez).
+ALTER TABLE `matrix_forensic_evidence`
+    ADD COLUMN IF NOT EXISTS `blood_pool_purity` FLOAT NULL DEFAULT NULL
+        COMMENT 'MODUL 2: biological_blood kanitlarinin anlik saflik degeri (0..1), lineer olarak zamanla azalir';
+
+-- [2] matrix_bots.activity -- /muhafizcagir anti-dupe havuz filtresi
+-- (server/mercenary_followers.lua Matrix.Mercenary.RequestSummon) artık
+-- runtime state.activity alanini ('idle'/'deployed') KALICI olarak takip
+-- edebilsin diye (sunucu yeniden başladığında havuz durumu korunur).
+ALTER TABLE `matrix_bots`
+    ADD COLUMN IF NOT EXISTS `activity` VARCHAR(32) NOT NULL DEFAULT 'idle'
+        COMMENT 'MODUL 1: idle=havuzda cagrilabilir, deployed=bir oyuncuya atanmis/sahada';
+
+-- [3] matrix_forensic_evidence.inflicted_force_striation -- server/forensics.lua
+-- Matrix.Forensics.SimulateWeaponFire: pompalı/sawnoff (shotgun) ateşlemelerinde
+-- klasik yiv-set eşleşmesi (striation_quality) SABİT 0.0'a kilitlenir; bunun
+-- yerine bu kolon (pellet-kütle vekili, pellet sayısıyla DOĞRUSAL) balistik
+-- eşleştirme için kullanılır. NULL == bu satır shotgun ateşlemesi değil.
+ALTER TABLE `matrix_forensic_evidence`
+    ADD COLUMN IF NOT EXISTS `inflicted_force_striation` FLOAT NULL DEFAULT NULL
+        COMMENT 'MODUL 4: shotgun pellet-kutle vekili balistik esleme degeri';

@@ -1223,11 +1223,30 @@ function Matrix.Diagnostics.Run(deep, replyTo, isAutoBoot)
         local startedAt = GetGameTimer()
         local checks = {}
 
+        -- ★ [MODUL 14.1] ANA AG BACAGI YALITIMI: FastChecks+DbChecks+
+        -- SimulationChecks onlarca ardisik senkron MySQL.query.await/
+        -- INFORMATION_SCHEMA turu barindirir -- Config.NetworkGuard.
+        -- DiagnosticsYieldEveryNChecks kontrolde bir Wait(0) ile ana
+        -- tick/ag dongusune GERI VERILIR, boylece txAdmin/master-list
+        -- poller'lari (dynamic.json/players.json/info.json) uzun,
+        -- kesintisiz bir sorgu patlamasi tarafindan AC BIRAKILMAZ.
+        local yieldEvery = (Config.NetworkGuard and Config.NetworkGuard.DiagnosticsYieldEveryNChecks) or 5
+        local sinceYield  = 0
+        local function MaybeYield()
+            sinceYield = sinceYield + 1
+            if sinceYield >= yieldEvery then
+                sinceYield = 0
+                Wait(0)
+            end
+        end
+
         for _, c in ipairs(FastChecks) do
             checks[#checks + 1] = RunCheck(c.name, c.fn)
+            MaybeYield()
         end
         for _, c in ipairs(DbChecks) do
             checks[#checks + 1] = RunCheck(c[1], c[2])
+            MaybeYield()
         end
         if deep then
             local deepOk, deepResult = pcall(RunDeepExitBridgeCheck)
@@ -1243,6 +1262,7 @@ function Matrix.Diagnostics.Run(deep, replyTo, isAutoBoot)
 
             for _, c in ipairs(SimulationChecks) do
                 checks[#checks + 1] = RunCheck(c[1], c[2])
+                MaybeYield()
             end
 
             Matrix.Diagnostics.PurgeDeepTestState()
@@ -1304,6 +1324,24 @@ end
 
 lib.callback.register('matrix:callback:getDiagnosticsReport', function(src)
     return lastReport
+end)
+
+-- =====================================================================
+-- ★ [MODUL 14.2] SUNUCU KALP ATISI (HEARTBEAT) YAYINI
+-- client/hud.lua bu event'in ZAMAN DAMGASINI tutar; Config.NetworkGuard.
+-- HeartbeatTimeoutMs suresi asilirsa client, ag hattini "riskli/tikanik"
+-- sayar VE adli event'lerini (matrix:server:reportPlayerWounded) DOGRUDAN
+-- gondermek yerine kendi LocalAdliBuffer'ina muhurler -- bu, sunucunun
+-- ana ag bacagi (I/O thread) gecici olarak tikandiginda/txAdmin poller
+-- timeout verdiginde adli izin havada kaybolmasini ONLER. Yayin, TEK bir
+-- hafif CreateThread ile yapilir -- diagnostik/DB tarama dongulerinin
+-- ICINE KARISTIRILMAZ (bu thread ASLA MySQL cagirmaz).
+-- =====================================================================
+CreateThread(function()
+    while true do
+        Wait((Config.NetworkGuard and Config.NetworkGuard.HeartbeatIntervalMs) or 5000)
+        TriggerClientEvent('matrix:client:networkHeartbeat', -1, GetGameTimer())
+    end
 end)
 
 -- =====================================================================

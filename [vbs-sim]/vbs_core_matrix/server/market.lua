@@ -528,6 +528,17 @@ function Matrix.RadioSilence.BreakForRedirect(citizenid, botId, trapHouseId)
         '[SESSIZLIK BOZULDU] %s -> Bot #%s icin telsiz mudahalesi (#%d. ardisik kirilma). Statik:%.2f Desifre-Sicramasi:+%.4f',
         citizenid, tostring(botId), n, staticIntensity, decryptionSpike)
 
+    -- ★ [MODUL 16.2] CO-OP EMIR ROLESI: bu ihlal artik yalnizca ihlali
+    -- yapan ortagin veya orijinal dispatcher'in ekraninda KALMAZ --
+    -- rutbede komuta yetkisi olan TUM Co-Op ortaklarina (Matrix.TeamAI.
+    -- BroadcastToCommandAuthority, server/team_ai.lua) monokrom bir
+    -- karargah bulteni olarak yansitilir.
+    if Matrix.TeamAI and type(Matrix.TeamAI.BroadcastToCommandAuthority) == 'function' then
+        pcall(Matrix.TeamAI.BroadcastToCommandAuthority,
+            ('%s -> Bot #%s icin sessizlik ihlali/telsiz mudahalesi (#%d. ardisik kirilma).'):format(
+                citizenid, tostring(botId), n))
+    end
+
     return staticIntensity, decryptionSpike
 end
 

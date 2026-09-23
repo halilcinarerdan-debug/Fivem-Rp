@@ -1886,6 +1886,26 @@ CreateThread(function()
     end
 end)
 
+--- ★ [MODUL 13] TAKTIK TURNIKE PROTOKOLU: koma modundaki bir botun
+--- 'deceased' arsivine dusme sayacini (ComaClock, yukarida) ERTELER --
+--- komayi IYILESTIRMEZ (biz bir sagli ekibi degiliz), sadece
+--- Matrix.RemoveBot(botId,'deceased') tetiklenene kadarki sureyi uzatir.
+--- YENI bir "olum sayaci" ICAT EDILMEZ -- MEVCUT ComaClock geriye kaydirilir.
+function Matrix.Bureau.ExtendComaClock(botId, extraSeconds)
+    local bot = Matrix.Bots[botId]
+    if not bot or bot.status ~= 'comatose' then return false, 'not_comatose' end
+    if not ComaClock[botId] then return false, 'no_active_clock' end
+
+    extraSeconds = tonumber(extraSeconds) or 0
+    if extraSeconds <= 0 then return false, 'bad_extension' end
+
+    ComaClock[botId] = ComaClock[botId] + extraSeconds
+    Matrix.Log('CORE', '[TURNIKE ERTELEME] Bot #%d koma->olum sayaci +%d saniye ertelendi.', botId, extraSeconds)
+    return true
+end
+
+exports('ExtendComaClock', function(botId, extraSeconds) return Matrix.Bureau.ExtendComaClock(botId, extraSeconds) end)
+
 -- =====================================================================
 -- [KOR NOKTA] SAATLİK MALİ DENETİM
 -- =====================================================================

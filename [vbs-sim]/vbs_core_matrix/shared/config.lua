@@ -26,7 +26,13 @@ Config.Forensics = {
     MatchCertaintyThreshold        = 0.75,
     FingerprintQualityCortisolWeight = 0.4,
     CasingWearWeight               = 0.3,
-    CasingCortisolWeight           = 0.2
+    CasingCortisolWeight           = 0.2,
+
+    -- MODUL 8: yari-otomatik silahlar icin tetik-agirligi/anti-makro
+    -- oran siniri -- bu araligin altinda gelen atislar (makro/rapid-fire)
+    -- silahi 'jammed' olarak isaretler (bkz. server/forensics.lua
+    -- Matrix.Forensics.OnWeaponShotFired / TriggerWeight guard).
+    TriggerWeightMs                 = 250
 }
 
 
@@ -368,6 +374,55 @@ Config.Forensics.WeaponJamBaseChance                    = 0.65
 Config.Forensics.WeaponJamHardDeleteRisk                = 0.90
 
 
+-- =====================================================================
+-- MODUL 2: ADLİ KAN DELİLİ (BIOLOGICAL_BLOOD)
+-- Bıçak/mêlée hasar raporu (server/wound_system.lua reportPlayerWounded)
+-- bu listede olan bir silahla geldiğinde server/forensics.lua Matrix.
+-- Forensics.RecordBloodEvidence tetiklenir. blood_pool_purity RNG YOK --
+-- kurbanın ANLIK cortisol_level/fatigue_level (wound_system.lua ile AYNI
+-- biyoloji alanları) üzerinden deterministik hesaplanır.
+-- =====================================================================
+Config.Forensics.MeleeWeaponNames = {
+    'WEAPON_KNIFE', 'WEAPON_SWITCHBLADE', 'WEAPON_DAGGER', 'WEAPON_BATTLEAXE',
+    'WEAPON_MACHETE', 'WEAPON_HATCHET', 'WEAPON_BAT', 'WEAPON_KNUCKLE',
+    'WEAPON_NIGHTSTICK', 'WEAPON_UNARMED'
+}
+
+-- =====================================================================
+-- MODUL 4: PAMPA/SAWNOFF (SHOTGUN) BALİSTİĞİ
+-- Saçma (pellet) silahlarında klasik yiv-set (striation) eşleştirmesi
+-- ANLAMSIZDIR (tek bir sabit namludan çok sayıda serbest parça çıkar) --
+-- bu yüzden striation_quality SABİT 0.0'a kilitlenir ve bunun yerine
+-- pellet-kütle vekili (inflicted_force_striation) üzerinden eşleştirme
+-- yapılır. RNG YOK: pellet sayısıyla DOĞRUSAL ölçeklenir.
+-- =====================================================================
+Config.Forensics.ShotgunWeaponItems = {
+    weapon_pumpshotgun  = true,
+    weapon_sawnoffshotgun = true
+}
+Config.Forensics.ShotgunPelletCount               = 8
+Config.Forensics.ShotgunForcePerPellet            = 0.09 -- inflicted_force_striation = PelletCount * ForcePerPellet (durability ile olceklenir)
+
+
+Config.Forensics.BloodEvidence = {
+    Item                   = 'blood_evidence_sample',
+    ItemLabel              = 'Kan Örneği (Adli)',
+    CollectionRadiusMeters = 2.5,
+
+    -- purity = clamp(1 - (cortisol*CortisolWeight + fatigue*FatigueWeight), 0, 1)
+    CortisolWeight         = 0.6,
+    FatigueWeight          = 0.4,
+
+    -- Lineer erime: her DecayIntervalMs'de purity -= DecayAmountPerInterval
+    -- (asimptotik/exp DEĞİL -- görev talimatı açıkça "lineer" istiyor).
+    DecayIntervalMs        = 30 * 60 * 1000, -- 30 dakika
+    DecayAmountPerInterval = 0.15,
+
+    -- Bu yaşın (gerçek zaman) üzerindeki kan delili satırları otonom silinir.
+    MaxAgeSeconds          = 2 * 60 * 60 -- 2 saat
+}
+
+
 Config.RadioSilence = {
     MaxDurationMinutes = 30
 }
@@ -513,10 +568,31 @@ Config.BlackMarket = {
     },
 
 
-    -- Karaborsa silah kataloğu: ox_inventory item adı + başlangıç metadata.
+    -- ★ MODUL 3: GERÇEKÇİLİK GEÇİŞİ — RPG/ağır patlayıcı/minigun/bombaatar
+    -- gibi gerçekçi-olmayan silah sınıfları TAMAMEN KALDIRILDI. Katalog artık
+    -- yalnızca 4 GERÇEKÇI sınıf sunar: Pistol / SMG / Rifle / Shotgun.
+    -- `class` alanı hem /namludegistir whitelist'i hem de bot muharebe AI'ı
+    -- (server/mercenary_followers.lua, server/hitsquad.lua) tarafından
+    -- okunur -- rifle taşıyan botlar mesafeden siper alır, shotgun taşıyan
+    -- botlar yakın mesafeye iter (bkz. Config.CombatByWeaponClass, aşağıda).
     Weapons = {
-        { id = 'bm_pistol', label = 'Tabanca (Seri No Silinmiş)', item = 'weapon_combatpistol', price = 3800.0,  durability = 55.0 },
-        { id = 'bm_ak47',   label = 'AK-47 (Seri No Silinmiş)',   item = 'weapon_assaultrifle', price = 15500.0, durability = 45.0 }
+        { id = 'bm_pistol',   label = 'Tabanca (Seri No Silinmiş)',      item = 'weapon_combatpistol', class = 'pistol',  price = 3800.0,  durability = 55.0 },
+        { id = 'bm_smg',      label = 'Mikro SMG (Seri No Silinmiş)',    item = 'weapon_microsmg',     class = 'smg',     price = 9800.0,  durability = 50.0 },
+        { id = 'bm_ak47',     label = 'Tüfek (Seri No Silinmiş)',        item = 'weapon_assaultrifle', class = 'rifle',   price = 15500.0, durability = 45.0 },
+        { id = 'bm_shotgun',  label = 'Pompalı Tüfek (Seri No Silinmiş)',item = 'weapon_pumpshotgun',  class = 'shotgun', price = 12000.0, durability = 48.0 }
+    },
+
+
+    -- ★ MODUL 3: silah SINIFI -> muharebe AI davranışı. Rifle'lar mesafeden
+    -- siper alıp angaje olur; shotgun'lar yakın mesafeye iter. Diğer
+    -- sınıflar (pistol/smg) mevcut varsayılan (dengeli) davranışı korur.
+    -- server/hitsquad.lua ve server/mercenary_followers.lua BU tabloyu
+    -- SetPedCombatAttributes/SetPedCombatRange cagrilarindan once okur.
+    CombatByWeaponClass = {
+        pistol  = { combat_range = 1, use_cover = false, seek_cover_ratio = 0 },  -- CR_NEAR
+        smg     = { combat_range = 1, use_cover = false, seek_cover_ratio = 0 },  -- CR_NEAR
+        rifle   = { combat_range = 2, use_cover = true,  seek_cover_ratio = 100 }, -- CR_FAR + BF_CanUseCover
+        shotgun = { combat_range = 0, use_cover = false, seek_cover_ratio = 0 }   -- CR_NEAR (agresif yakinlasma)
     },
 
 
@@ -524,8 +600,10 @@ Config.BlackMarket = {
     -- akışından geçer (bkz. server/rendezvous.lua). `item`/`count` çifti
     -- ox_inventory'ye handoff anında AddItem ile eklenir.
     Ammo = {
-        { id = 'bm_ammo_pistol', label = 'Tabanca Mühimmatı (x60, Elden)', item = 'ammo_pistol', count = 60, price = 900.0  },
-        { id = 'bm_ammo_rifle',  label = 'Tüfek Mühimmatı (x90, Elden)',   item = 'ammo_rifle',   count = 90, price = 2100.0 }
+        { id = 'bm_ammo_pistol',  label = 'Tabanca Mühimmatı (x60, Elden)',    item = 'ammo_pistol',  class = 'pistol',  count = 60, price = 900.0  },
+        { id = 'bm_ammo_smg',     label = 'SMG Mühimmatı (x90, Elden)',        item = 'ammo_smg',     class = 'smg',     count = 90, price = 1400.0 },
+        { id = 'bm_ammo_rifle',   label = 'Tüfek Mühimmatı (x90, Elden)',      item = 'ammo_rifle',   class = 'rifle',   count = 90, price = 2100.0 },
+        { id = 'bm_ammo_shotgun', label = 'Pompalı Mühimmatı (x24, Elden)',    item = 'ammo_shotgun', class = 'shotgun', count = 24, price = 1600.0 }
     },
 
 
@@ -545,7 +623,53 @@ Config.BlackMarket = {
     -- /namludegistir yalnızca bu whitelist'teki silah item'ları için çalışır.
     ReplaceableWeaponItems = {
         weapon_combatpistol = true,
-        weapon_assaultrifle = true
+        weapon_microsmg     = true,
+        weapon_assaultrifle = true,
+        weapon_pumpshotgun  = true
+    },
+
+
+    -- ★ MODUL 4: DETERMİNİSTİK KARABORSA STOK PENCERESİ -- RNG YOK. Saatlik
+    -- (UTC, os.time() bucket) + citizenid'in toptancı güveninin (matrix_
+    -- supplier_trust.trust, bkz. server/logistics.lua Matrix.Supplier.
+    -- GetTrust) sağlama toplamı + silah SINIFININ sağlama toplamı bir 0-23
+    -- kovaya (bucket) katlanır. Bucket bu pencerenin ALTINDAYSA o sınıf O
+    -- SAAT stokta YOKTUR (server/blackmarket.lua IsWeaponClassAvailableNow).
+    AvailabilityClosedWindowHours = 6,
+    AvailabilitySupplierId        = 'blackmarket_weapons',
+
+
+    -- ★ MODUL 3: karaborsa silah/mühimmat teslimatı VE bot mühimmat ikmali
+    -- (server/logistics.lua Matrix.Logistics.DispatchAmmoRun) artık qbx_core
+    -- 'weapon' ruhsatı ZORUNLU kılar -- ruhsatsız/geçersiz citizenid teslimat
+    -- REDDEDİLİR (rütbe/izin-yok mesajıyla).
+    WeaponLicenseType = 'weapon',
+
+
+    -- ★ MODUL 9: SİLAH MODİFİKASYONU — ox_inventory metadata ile eklenen
+    -- iki takılabilir parça. glock_switch SADECE `class == 'pistol'` uyumlu
+    -- item'lara, mimtac_drop_in_trigger SADECE `class == 'rifle'` uyumlu
+    -- item'lara takılır (bkz. server/blackmarket.lua Matrix.BlackMarket.
+    -- AttachWeaponMod). Global Config sabitleri MUTASYONA UĞRATILMAZ (bu,
+    -- silahlar-arasi capraz-kirlenme/ekonomi hatasi olurdu) -- her ikisi de
+    -- SADECE takili oldugu silahin metadata'sinda tutulan bir CARPAN/DELTA
+    -- olarak uygulanir (server/forensics.lua ComputeMechanicalJamProbability
+    -- ve OnWeaponShotFired bu metadata alanlarini okur).
+    WeaponMods = {
+        glock_switch = {
+            label                    = 'Glock Switch (Tam-Otomatik Dönüştürücü)',
+            compatible_class         = 'pistol',
+            price                    = 6500.0,
+            full_auto                = true,
+            jam_coefficient_multiplier = 3.0
+        },
+        mimtac_drop_in_trigger = {
+            label                          = 'MIMTAC Drop-In Tetik Grubu',
+            compatible_class                = 'rifle',
+            price                           = 4200.0,
+            trigger_weight_multiplier       = 0.60, -- TriggerWeightMs %40 azalir
+            jam_threshold_percent_delta     = -15.0 -- MechanicalJamThresholdPercent 15 puan duser
+        }
     }
 }
 
@@ -674,7 +798,46 @@ Config.HitSquad = {
     VehicleModel = 'sultan2',
     PedModel     = 'g_m_y_ballasout_01',
     Weapon       = 'WEAPON_MICROSMG',
-    PedAccuracy  = 70
+    PedAccuracy  = 70,
+
+    -- =================================================================
+    -- ★ [MODUL 10] AMBUSH GATING — "sadece oyuncu bosta/AFK diye" cete
+    -- ambush'i ASLA tetiklenmez. server/gang_hoods.lua'nin ZATEN VAR OLAN
+    -- matrix_gang_hoods.control_ratio alani (bir mahallenin oyuncu
+    -- hiyerarsisine gore ne kadar "kendi" / sadik oldugunu, dolayisiyla
+    -- ZIT ucta ne kadar HUSUMETLI/tartismali oldugunu) VE loot_opened_at
+    -- (o mahallede yakin zamanda gercek bir kiskirtma/yagma olayi
+    -- yasandigini) IKINCI bir "husumet" tablosu ICAT EDILMEDEN dogrudan
+    -- okur. control_ratio DUSUK ise (kontrol kaybedilmis/tartismali) VEYA
+    -- yagma penceresi Config.GangHoods.LootWindowSeconds icinde acildiysa
+    -- husumet AKTIF sayilir; ikisi de degilse o tick icin ambush TAMAMEN
+    -- ATLANIR.
+    -- =================================================================
+    -- control_ratio bu esigin ALTINA dusmeden (yani mahalle hala byk
+    -- oranda "sadik/kendi" sayilirken) pasif/AFK bir oyuncuya ambush
+    -- gonderilmez.
+    HostileControlRatioThreshold = 0.85,
+
+    -- loot_opened_at bu kadar saniye icinde acilmissa "yakin zamanda
+    -- kiskirtilmis" sayilir. Config.GangHoods (bu dosyada DAHA ASAGIDA
+    -- tanimlanir, ileri-referans YOK) henuz mevcut degilken bu tablo
+    -- olusturuluyor -- bu yuzden server/hitsquad.lua CALISMA ZAMANINDA
+    -- (Config.GangHoods.LootWindowSeconds or bu varsayilan) okur; ikinci
+    -- bir pencere suresi ICAT EDILMEZ, yalnizca ayni degeri (120) burada
+    -- da tasir.
+    ProvocationWindowSeconds = 120,
+
+    -- ★ [MODUL 10] KOLEKTIF HEDEFLEME — driveby hedef havuzu artik yalniz
+    -- PlayerPedId() DEGIL, oyuncu + Config.Mercenary.CombatAggroRadius
+    -- icindeki muhafiz/takipci botlari da icerir (server/mercenary_followers.
+    -- lua'nin ZATEN VAR OLAN FollowerNetIds takibi okunur, ikinci bir
+    -- "takipci konumu" sistemi ICAT EDILMEZ). RNG YOK: havuz icinden
+    -- SADECE en yakin hedef secilir (mesafeye gore deterministik siralama,
+    -- esitlikte netId'ye gore sabit tie-break).
+    -- NOT: Config.Mercenary bu dosyada DAHA ASAGIDA tanimlanir (ileri-
+    -- referans YOK), bu yuzden deger burada Config.Mercenary.CombatAggroRadius
+    -- ILE AYNI (35.0) sabit yazilir -- ikisi ayni fiziksel menzili ifade eder.
+    AllyTargetScanRadius = 35.0
 }
 
 
@@ -1179,7 +1342,116 @@ Config.Mercenary = {
     -- Performans: mesafe/araç kontrolleri her frame DEĞİL, bu aralıkta
     -- çalışan hafif bir önbellek üzerinden yürütülür.
     CheckIntervalMs       = 1500,
-    SummonCooldownMs      = 5000
+    SummonCooldownMs      = 5000,
+
+    -- =================================================================
+    -- ★ [MODUL 11] HOLD/GUARD/OBSERVE NAVMESH KİLİDİ — bkz. client/
+    -- mercenary_followers.lua refresh döngüsü. Bir takipçi hold/guard/
+    -- observe moduna atandığında, ankraj noktasının bu yarıçapı İÇİNE
+    -- ulaştığı an TaskGoToCoordAnyMeans/TaskGoToEntity ARTIK YENİDEN
+    -- YAYINLANMAZ (NavMesh çırpınması/jitter önlenir) -- yalnızca durum
+    -- değişince (yeni ankraj ataması veya tehdit tespiti) görev yeniden
+    -- yayınlanır.
+    -- =================================================================
+    HoldAnchorRadius      = 1.5,
+
+    -- Ankraja ulaşınca TaskAchieveHeading ile önce emrin verildiği anda
+    -- oyuncunun baktığı yöne kilitlenir (bu süre içinde).
+    HoldHeadingLockMs     = 3000,
+
+    -- Ankraj sonrası ped'i sahada TUTAN nöbet duruşu -- codebase'in
+    -- ZATEN VAR OLAN TaskStartScenarioInPlace deseniyle (bkz. client/
+    -- trap_house_client.lua, Config.TrapHouseInterior.AmbientScenarios)
+    -- AYNI native; ikinci bir "durma" mekanizması İCAT EDİLMEZ.
+    GuardScenario         = 'WORLD_HUMAN_GUARD_STAND'
+}
+
+-- =====================================================================
+-- ★ [MODUL 13] MUHAREBE STRESI (PANIK) + TAKTIK MUHABERE + TURNIKE
+-- =====================================================================
+Config.CombatPanic = {
+    -- >= bu esikte bot F10/G/H taktik emirlerini (hold/guard/attack/follow)
+    -- ANINDA REDDEDER. RNG YOK -- bot.biology.cortisol_level (ZATEN VAR
+    -- OLAN alan, MODUL 7 suppression ile AYNI) uzerinden okunur.
+    RefusalCortisolThreshold = 0.85,
+    -- Histerezis: panicking=true iken cortisol bu esigin ALTINA
+    -- dusmeden itaat GERI GELMEZ (RefusalCortisolThreshold'un ANLIK
+    -- altina/ustune salinimi "yeniden itaat" SAYILMAZ).
+    CalmCortisolThreshold    = 0.60
+}
+
+Config.CommsLink = {
+    -- Bu mesafe ICINDE sesli komut gecerlidir -- telsiz/Acik Hat
+    -- ARANMAZ.
+    PhysicalCommandRadius = 8.0,
+    -- Config.BlackMarket'teki (bm_burner) ile AYNI item -- ikinci bir
+    -- "telefon" ICAT EDILMEZ.
+    BurnerPhoneItem       = 'burner_phone',
+    -- Bot/ekip bu esigin USTUNDE siber parazit/kor-bolge altindaysa
+    -- (server/logistics.lua Config.Logistics.DeadZones ile AYNI harita)
+    -- komut BOTA HIC ULASMAZ.
+    StaticBlockThreshold  = 0.70,
+    -- DeadZone icindeki botlar icin sabit statik parazit degeri (RNG
+    -- YOK) -- StaticBlockThreshold'u asar, komutu bloke eder.
+    DeadZoneStaticValue   = 1.0
+}
+
+Config.TacticalTourniquet = {
+    Item                 = 'tactical_tourniquet',
+    ApplyRadiusMeters    = 2.0,
+    ApplyDurationMs      = 6000,
+    -- Basarili mudahalede leg_injury/arm_injury bu oranla carpanla
+    -- KUCULTULUR (leg_injury * (1 - Pct)) -- kalici sakatlik esigine
+    -- (Config.BotWounds.CripplingThreshold) girme ihtimali dusurulur.
+    InjuryReductionPct   = 0.50,
+    -- server/bureau.lua [KOR NOKTA] KOMA MODU'nun 2 saatlik
+    -- deceased-arsivleme sayacini (ComaClock) ERTELEMEK icin kullanilir
+    -- -- YENI bir "olum sayaci" ICAT EDILMEZ, MEVCUT olan uzatilir.
+    ComaExtensionSeconds = 2 * 3600
+}
+
+-- =====================================================================
+-- ★ [MODUL 14] SUNUCU AGI TIMEOUT KORUMASI + GECIKMELI ADLI PAKET TAMPONU
+-- =====================================================================
+Config.NetworkGuard = {
+    -- Sunucu bu araliktA TUM istemcilere hafif bir kalp atisi (heartbeat)
+    -- event'i yayinlar -- client/hud.lua bunun ZAMAN DAMGASINI tutar.
+    HeartbeatIntervalMs   = 5000,
+    -- Client bu sureden UZUN suredir bir heartbeat ALMADIYSA ag hattini
+    -- "riskli/tikanik" sayar -- adli event'ler DOGRUDAN gonderilmez,
+    -- LocalAdliBuffer'a mühürlenir.
+    HeartbeatTimeoutMs    = 12000,
+    -- ★ client/hud.lua LocalAdliBuffer -- RAM-bomb korumali FIFO tampon
+    -- kapasitesi (bu limitin USTUNDEKI en eski kayit sessizce dusurulur).
+    LocalBufferMaxEntries = 32,
+    -- matrix_diagnostics.lua onServerResourceStart taramasi (FastChecks +
+    -- DbChecks + SimulationChecks) bu KADAR kontrolde bir Wait(0) ile ana
+    -- ag/tick dongusune GERI VERIR -- txAdmin/master-list poller'lari
+    -- (dynamic.json/players.json/info.json) uzun, kesintisiz bir
+    -- INFORMATION_SCHEMA sorgu patlamasi tarafindan AC BIRAKILMAZ.
+    DiagnosticsYieldEveryNChecks = 5
+}
+
+-- =====================================================================
+-- ★ [MODUL 15] OPENAI TABANLI STRATEJIK MUHAKEME + OTONOM TIM KOMUTASI
+-- server/team_ai.lua. OpenAI kimlik bilgisi Config.AI_Matrix_Brain
+-- (server/bureau.lua Matrix.Bureau.RunAIAdvisoryPass ile AYNI provider/
+-- apiKey/model) YENIDEN KULLANILIR -- ikinci bir "OpenAI anahtari" ICAT
+-- EDILMEZ.
+-- =====================================================================
+Config.TeamAI = {
+    ValidTeams = { alfa = true, bravo = true },
+
+    -- AI yaniti eksik/gecersiz/HTTP hatali donerse (veya Config.
+    -- AI_Matrix_Brain.apiKey yapilandirilmamissa) BU deterministik
+    -- varsayilana DUSER -- ASLA math.random ile "tahmin" edilmez.
+    DefaultDirective = {
+        sneak_mode        = false,
+        lspd_engagement   = 'flee',
+        casualty_protocol = 'carry'
+    },
+
+    Model = 'gpt-4o-mini'
 }
 
 -- ---------------------------------------------------------------------

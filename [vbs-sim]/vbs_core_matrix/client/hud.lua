@@ -1,3 +1,12 @@
+-- ★ [MODUL 16.1] EMNIYET ILKLENDIRMESI: bu dosyalarin hicbiri global Matrix
+-- tablosunu calisma zamaninda okumaz (bkz. server-side yorumlar), ama
+-- ileride bir referans eklenirse client-side VM'in erken/farkli sirada
+-- yuklenmesi durumunda nil-index hatasi ASLA olusmasin diye zararsiz bir
+-- guvenlik agi olarak eklenir.
+Matrix = Matrix or {}
+Matrix.Client = Matrix.Client or {}
+
+
 -- =====================================================================
 -- MATRIX HUD / client/hud.lua  (KATMAN 6 — RENDEZVOUS/TAHKİMAT EKİ)
 -- Saf metin tabanlı, monokrom (yeşil/beyaz/kırmızı) Taktik Durum HUD'u.
@@ -387,6 +396,60 @@ AddEventHandler('onClientResourceStart', function(resourceName)
 end)
 
 -- =====================================================================
+-- ★ [FIX] TAKTIK HUD RENDER DONGUSU -- BU DOSYADA DAHA ONCE HICBIR YERDE
+-- YOKTU: hudActive/hudLines dogru sekilde tutuluyor (ToggleHud, hudSnapshot
+-- event'i), ama onlari EKRANA CIZEN bir CreateThread dongusu hic
+-- YAZILMAMISTI -- DrawMonoLine bu dosyada yalnizca [U3] mekanik tutukluk
+-- uyarisi icin cagriliyordu. F6/K basildiginda hudActive dogru sekilde
+-- toggle oluyor VE sunucudan snapshot geliyordu, ama HICBIR SEY EKRANA
+-- BASILMIYORDU -- "HUD bulten cercevesi ekrana gelmiyor" sikayetinin
+-- KOK NEDENI budur (bir race/yaris kosulu veya ag kesintisi DEGIL).
+--
+-- hudActive=false iken dongu Wait(250) ile HAFIF bekler (0 Resmon
+-- disiplini); hudActive=true iken her frame (Wait(0)) sabit basliktan
+-- itibaren hudLines dizisini SIRAYLA cizer -- header/danger/normal
+-- satirlar COLOR_HEADER/COLOR_DANGER/COLOR_VALUE ile ayirt edilir.
+-- =====================================================================
+local HUD_ORIGIN_X     = 0.015
+local HUD_ORIGIN_Y     = 0.04
+local HUD_LINE_HEIGHT  = 0.021
+local HUD_TEXT_SCALE   = 0.32
+
+CreateThread(function()
+    while true do
+        if hudActive then
+            local y = HUD_ORIGIN_Y
+            DrawMonoLine(HUD_ORIGIN_X, y, '=== TAKTIK HUD (MATRIX) ===', COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3], HUD_TEXT_SCALE)
+            y = y + HUD_LINE_HEIGHT
+
+            if #hudLines == 0 then
+                -- ★ [FIX] sunucudan HENUZ ilk snapshot gelmediyse (agir
+                -- gecikme/ag kesintisi) bulten cercevesi BOS BEKLEMEZ --
+                -- senkronize ediliyor bulteni ANINDA cizilir, bos bir
+                -- ekran ASLA gorulmez.
+                DrawMonoLine(HUD_ORIGIN_X, y, '[SENKRONIZE EDILIYOR...]', COLOR_DIM[1], COLOR_DIM[2], COLOR_DIM[3], HUD_TEXT_SCALE)
+            else
+                for i = 1, #hudLines do
+                    local line = hudLines[i]
+                    local r, g, b = COLOR_VALUE[1], COLOR_VALUE[2], COLOR_VALUE[3]
+                    if line.danger then
+                        r, g, b = COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3]
+                    elseif line.header then
+                        r, g, b = COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3]
+                    end
+                    DrawMonoLine(HUD_ORIGIN_X, y, line.text, r, g, b, HUD_TEXT_SCALE)
+                    y = y + HUD_LINE_HEIGHT
+                end
+            end
+
+            Wait(0)
+        else
+            Wait(250)
+        end
+    end
+end)
+
+-- =====================================================================
 -- ★ KATMAN 5 ULTIMATE [U3]: MEKANİK TUTUKLUK TESPİTİ & TAHLİYE
 --
 -- Mermi-sayısı-azalma (ammo-delta) tespiti kullanılır — IsPedShooting'in
@@ -563,6 +626,91 @@ RegisterKeyMapping('silahtahliye', 'Sikisan Silahi Tahliye Et (Tutukluk Giderme)
 
 
 -- =====================================================================
+-- ★ [MODUL 14.2] ISTEMCI TARAFLI ADLI PAKET TAMPONU (Delayed Buffer Sync)
+-- Ag kilitlenmeleri/timeout riski sirasinda sunucuya giden hasar/bayiltma
+-- event'lerinin (matrix:server:reportPlayerWounded) havada dusup adli iz
+-- birakmadan kaybolmasini ONLER. server/matrix_diagnostics.lua'nin
+-- yayinladigi 'matrix:client:networkHeartbeat' zaman damgasi izlenir --
+-- bu sure Config.NetworkGuard.HeartbeatTimeoutMs'i asarsa ag hatti
+-- "riskli/tikanik" sayilir ve event KORLEMESINE gonderilmez, bunun
+-- yerine LocalAdliBuffer'a (FIFO, Config.NetworkGuard.LocalBufferMaxEntries
+-- tavanli -- RAM-bomb korumali, en eski kayit sessizce dusurulur)
+-- muhurlenir. Ag hatti normale doner donmez tampon TEK bir toplu paket
+-- (Delayed Batch Sync) halinde 'matrix:server:reportPlayerWoundedBatch'
+-- ile sunucuya gonderilir.
+-- =====================================================================
+local LocalAdliBuffer   = {}
+local LastHeartbeatAt   = GetGameTimer()
+local WasNetworkHealthy = true
+
+RegisterNetEvent('matrix:client:networkHeartbeat', function()
+    LastHeartbeatAt = GetGameTimer()
+end)
+
+local function IsNetworkHealthy()
+    local timeoutMs = (Config.NetworkGuard and Config.NetworkGuard.HeartbeatTimeoutMs) or 12000
+    return (GetGameTimer() - LastHeartbeatAt) <= timeoutMs
+end
+
+local function PushToLocalAdliBuffer(record)
+    local maxEntries = (Config.NetworkGuard and Config.NetworkGuard.LocalBufferMaxEntries) or 32
+    LocalAdliBuffer[#LocalAdliBuffer + 1] = record
+    -- ★ RAM-bomb korumasi: tavan asilirsa EN ESKI kayit (FIFO basi)
+    -- sessizce dusurulur -- tampon sinirsiz BUYUMEZ.
+    while #LocalAdliBuffer > maxEntries do
+        table.remove(LocalAdliBuffer, 1)
+    end
+end
+
+local function FlushLocalAdliBuffer()
+    if #LocalAdliBuffer == 0 then return end
+    TriggerServerEvent('matrix:server:reportPlayerWoundedBatch', LocalAdliBuffer)
+    LocalAdliBuffer = {}
+end
+
+--- ★ Guvenli sarmalayici: ag hatti SAGLIKLIYSA DOGRUDAN gonderir (mevcut
+--- davranis DEGISMEZ); DEGILSE korlemesine firlatmak yerine yerel
+--- tampona muhurler. Sagliga DONUS aninda tampon TOPLU olarak bosaltilir.
+local function ReportWoundedSafe(attackerServerId, weaponHashStr)
+    local healthy = IsNetworkHealthy()
+
+    if healthy and not WasNetworkHealthy then
+        FlushLocalAdliBuffer()
+    end
+    WasNetworkHealthy = healthy
+
+    if healthy then
+        TriggerServerEvent('matrix:server:reportPlayerWounded', attackerServerId, weaponHashStr)
+    else
+        local ped = PlayerPedId()
+        local coords = ped and ped ~= 0 and GetEntityCoords(ped) or nil
+        PushToLocalAdliBuffer({
+            attacker_server_id = attackerServerId,
+            weapon_hash         = weaponHashStr,
+            coords_x            = coords and coords.x or 0.0,
+            coords_y            = coords and coords.y or 0.0,
+            coords_z            = coords and coords.z or 0.0,
+            ts                  = os.time()
+        })
+    end
+end
+
+-- ★ Ag hatti saglikliyken de periyodik olarak kontrol eder -- sadece
+-- yeni bir hasar event'i geldiginde degil, sagliga DONUS anini da
+-- YAKALAR (ornegin oyuncu o sure icinde hic hasar almadiysa bile tampon
+-- bir sonraki saglikli tick'te bosaltilir).
+CreateThread(function()
+    while true do
+        Wait(2000)
+        local healthy = IsNetworkHealthy()
+        if healthy and not WasNetworkHealthy then
+            FlushLocalAdliBuffer()
+        end
+        WasNetworkHealthy = healthy
+    end
+end)
+
+-- =====================================================================
 -- ★ YERALTI GENISLETMESI KATMAN 2: OYUNCU-HASAR TESPITI
 -- Vanilla 'CEventNetworkEntityDamage' gameEventTriggered'i, yerel oyuncu
 -- kurbanken YALNIZCA sunucuya bir bildirim gonderir -- server/wound_
@@ -586,7 +734,7 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
     end
 
     local weaponHashStr = weaponHash and tostring(weaponHash) or nil
-    TriggerServerEvent('matrix:server:reportPlayerWounded', attackerServerId, weaponHashStr)
+    ReportWoundedSafe(attackerServerId, weaponHashStr)
 end)
 
 

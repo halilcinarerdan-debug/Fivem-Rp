@@ -126,15 +126,22 @@ function Matrix.Forensics.GetWeaponShotLifespan(weaponItemName)
 end
 
 
-function Matrix.Forensics.ComputeMechanicalJamProbability(durability)
+-- ★ MODUL 9: thresholdDelta (puan, örn. mimtac_drop_in_trigger = -15.0) ve
+-- coefficientMultiplier (örn. glock_switch = 3.0) opsiyoneldir -- SADECE
+-- takili moda sahip SPESIFIK silahin metadata'sindan gelir, GLOBAL
+-- Config.Forensics degerleri asla mutasyona ugratilmaz.
+function Matrix.Forensics.ComputeMechanicalJamProbability(durability, thresholdDelta, coefficientMultiplier)
     durability = Matrix.Clamp(tonumber(durability) or 100.0, 0.0, 100.0)
-    local threshold = Config.Forensics.MechanicalJamThresholdPercent
+    local threshold = Matrix.Clamp(
+        Config.Forensics.MechanicalJamThresholdPercent + (tonumber(thresholdDelta) or 0.0),
+        0.0, 100.0)
     if durability >= threshold then return 0.0 end
 
 
     local ratio = Matrix.Clamp(1.0 - (durability / math_max(threshold, 0.0001)), 0.0, 1.0)
     local exponent = Config.Forensics.MechanicalJamExponent or 3
-    local probability = (ratio ^ exponent) * (Config.Forensics.MechanicalJamCoefficient or 0.35)
+    local coefficient = (Config.Forensics.MechanicalJamCoefficient or 0.35) * (tonumber(coefficientMultiplier) or 1.0)
+    local probability = (ratio ^ exponent) * coefficient
     return Matrix.Clamp(probability, 0.0, 1.0)
 end
 
@@ -229,7 +236,7 @@ end
 -- =====================================================================
 -- WEAPON FIRE SIMULATION
 -- =====================================================================
-function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, evidenceType, weaponDurability)
+function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, evidenceType, weaponDurability, weaponItemName)
     local actor = Matrix.ResolveActor(actorRef)
     if not actor then return nil end
 
@@ -254,9 +261,31 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
     local qKovan = Matrix.Clamp(qKovanBase * weaponDurability, 0.0, 1.0)
 
 
+    -- ★ MODUL 4: SHOTGUN BALİSTİĞİ -- klasik yiv-set eşleşmesi saçma
+    -- (pellet) silahlarda anlamsızdır: striation_quality SABİT 0.0'a
+    -- kilitlenir, bunun yerine pellet-kütle vekili (inflictedForceStriation,
+    -- pellet sayısıyla DOĞRUSAL, RNG YOK) ballistik eşleştirme kullanılır.
+    local isShotgun = type(weaponItemName) == 'string'
+        and Config.Forensics.ShotgunWeaponItems
+        and Config.Forensics.ShotgunWeaponItems[weaponItemName] == true
+
+    local inflictedForceStriation = nil
+    if isShotgun then
+        qKovan = 0.0
+        local pelletCount = Config.Forensics.ShotgunPelletCount or 8
+        local forcePerPellet = Config.Forensics.ShotgunForcePerPellet or 0.09
+        inflictedForceStriation = Matrix.Clamp(pelletCount * forcePerPellet * weaponDurability, 0.0, 1.0)
+    end
+
+
     local fingerprintQuality = Matrix.Forensics.ComputeFingerprintQuality(actor)
     local dnaId              = GetActorDnaId(actor)
-    local matchCertainty     = Matrix.Clamp(qKovan * Config.BallisticStriationPrecision, 0.0, 1.0)
+    local matchCertainty
+    if isShotgun then
+        matchCertainty = Matrix.Clamp(inflictedForceStriation * Config.BallisticStriationPrecision, 0.0, 1.0)
+    else
+        matchCertainty = Matrix.Clamp(qKovan * Config.BallisticStriationPrecision, 0.0, 1.0)
+    end
 
 
     if weaponDurability < Config.Forensics.WeaponDurabilityLabBlindnessThreshold then
@@ -281,21 +310,21 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
         MySQL.prepare([[
             INSERT INTO matrix_forensic_evidence
                 (id, ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
-                 match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                 match_certainty, sealed_as_crime_weapon, inflicted_force_striation, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ]], {
             evidenceId, ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
-            matchCertainty, sealed and 1 or 0, cx, cy, cz
+            matchCertainty, sealed and 1 or 0, inflictedForceStriation, cx, cy, cz
         })
     else
         MySQL.prepare([[
             INSERT INTO matrix_forensic_evidence
                 (ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
-                 match_certainty, sealed_as_crime_weapon, coords_x, coords_y, coords_z, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                 match_certainty, sealed_as_crime_weapon, inflicted_force_striation, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
         ]], {
             ballisticId, evidenceType, qKovan, dnaId, fingerprintQuality,
-            matchCertainty, sealed and 1 or 0, cx, cy, cz
+            matchCertainty, sealed and 1 or 0, inflictedForceStriation, cx, cy, cz
         })
     end
 
@@ -311,17 +340,101 @@ function Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear,
 
 
     return {
-        evidence_id         = evidenceId or -1,
-        ballistic_id        = ballisticId,
-        dna_id              = dnaId,
-        weapon_wear         = weaponWear,
-        weapon_durability   = weaponDurability,
-        striation_quality   = qKovan,
-        fingerprint_quality = fingerprintQuality,
-        match_certainty     = matchCertainty,
-        sealed              = sealed,
-        jam_chance          = Matrix.Forensics.ComputeJamChance(weaponDurability),
-        hard_delete_risk    = Matrix.Forensics.GetHardDeleteRiskIfJammed(weaponDurability)
+        evidence_id               = evidenceId or -1,
+        ballistic_id              = ballisticId,
+        dna_id                    = dnaId,
+        weapon_wear               = weaponWear,
+        weapon_durability         = weaponDurability,
+        striation_quality         = qKovan,
+        inflicted_force_striation = inflictedForceStriation,
+        fingerprint_quality       = fingerprintQuality,
+        match_certainty           = matchCertainty,
+        sealed                    = sealed,
+        jam_chance                = Matrix.Forensics.ComputeJamChance(weaponDurability),
+        hard_delete_risk          = Matrix.Forensics.GetHardDeleteRiskIfJammed(weaponDurability)
+    }
+end
+
+
+-- =====================================================================
+-- MODUL 2: ADLİ KAN DELİLİ (BIOLOGICAL_BLOOD)
+-- =====================================================================
+function Matrix.Forensics.ComputeBloodPoolPurity(cortisolLevel, fatigueLevel)
+    local cfg = Config.Forensics.BloodEvidence
+    local cortisol = Matrix.Clamp(tonumber(cortisolLevel) or 0.0, 0.0, 1.0)
+    local fatigue  = Matrix.Clamp(tonumber(fatigueLevel) or 0.0, 0.0, 1.0)
+    return Matrix.Clamp(
+        1.0 - (cortisol * cfg.CortisolWeight) - (fatigue * cfg.FatigueWeight),
+        0.0, 1.0
+    )
+end
+
+
+-- victimDnaId/attackerDnaId: dna_id string'leri (player veya bot -- her
+-- iki taraf da Matrix.ResolveActor'un ürettiği AYNI dna_id şemasını
+-- kullanır). traceId = 'KNIFE-<victimDna>-<attackerDna>' -- ballistic_id
+-- kolonuyla AYNI FK sözleşmesine uyması icin once matrix_ballistic_weapons
+-- icine (silah OLMAYAN) bir referans satiri yazilir; TEK transaction icinde.
+function Matrix.Forensics.RecordBloodEvidence(victimDnaId, attackerDnaId, coords, cortisolLevel, fatigueLevel)
+    if type(victimDnaId) ~= 'string' or victimDnaId == '' then return nil end
+    attackerDnaId = (type(attackerDnaId) == 'string' and attackerDnaId ~= '') and attackerDnaId or 'UNKNOWN'
+
+    local traceId = ('KNIFE-%s-%s'):format(victimDnaId, attackerDnaId)
+    local purity  = Matrix.Forensics.ComputeBloodPoolPurity(cortisolLevel, fatigueLevel)
+
+    local cx, cy, cz = 0.0, 0.0, 0.0
+    if coords and type(coords.x) == 'number' and type(coords.y) == 'number' and type(coords.z) == 'number' then
+        cx, cy, cz = coords.x, coords.y, coords.z
+    end
+
+    local evidenceId = NextEvidenceId()
+
+    local evidenceQuery, evidenceValues
+    if evidenceId then
+        evidenceQuery = [[
+            INSERT INTO matrix_forensic_evidence
+                (id, ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
+                 match_certainty, sealed_as_crime_weapon, blood_pool_purity, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, ?, 'biological_blood', 0.0, ?, ?, 0.0, 0, ?, ?, ?, ?, NOW())
+        ]]
+        evidenceValues = { evidenceId, traceId, victimDnaId, purity, purity, cx, cy, cz }
+    else
+        evidenceQuery = [[
+            INSERT INTO matrix_forensic_evidence
+                (ballistic_id, evidence_type, striation_quality, fingerprint_id, fingerprint_quality,
+                 match_certainty, sealed_as_crime_weapon, blood_pool_purity, coords_x, coords_y, coords_z, created_at)
+            VALUES (?, 'biological_blood', 0.0, ?, ?, 0.0, 0, ?, ?, ?, ?, NOW())
+        ]]
+        evidenceValues = { traceId, victimDnaId, purity, purity, cx, cy, cz }
+    end
+
+    -- ★ Rule #2: explicit transaction, NOW(), no partial writes.
+    local ok = pcall(function()
+        MySQL.transaction.await({
+            {
+                query = [[
+                    INSERT INTO matrix_ballistic_weapons
+                        (ballistic_id, weapon_serial, wear_level, sealed_as_crime_weapon, first_registered)
+                    VALUES (?, ?, 0.0, 0, NOW())
+                    ON DUPLICATE KEY UPDATE wear_level = wear_level
+                ]],
+                values = { traceId, traceId }
+            },
+            { query = evidenceQuery, values = evidenceValues }
+        })
+    end)
+
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] RecordBloodEvidence transaction basarisiz (yutuldu): %s', tostring(traceId))
+        return nil
+    end
+
+    Matrix.Log('FORENSICS', '[KAN DELİLİ] %s -> kurban:%s fail:%s saflik:%.3f', traceId, victimDnaId, attackerDnaId, purity)
+
+    return {
+        evidence_id        = evidenceId or -1,
+        trace_id           = traceId,
+        blood_pool_purity  = purity
     }
 end
 
@@ -466,12 +579,45 @@ function Matrix.Forensics.OnWeaponShotFired(actorRef, weaponItemName, weaponSeri
     if meta.jammed then return nil, 'already_jammed' end
 
 
+    -- =================================================================
+    -- ★ MODUL 8: TETİK-AĞIRLIĞI / ANTİ-MAKRO ORAN SINIRI
+    -- Yarı-otomatik silahlar icin Config.Forensics.TriggerWeightMs (250ms)
+    -- altinda gelen ardisik atislar (makro/rapid-fire input) silahi ANINDA
+    -- 'jammed' isaretler -- fiziksel tetik-agirligi taklidi, RNG YOK, salt
+    -- GetGameTimer() delta karsilastirmasi. MODUL 9 (mimtac_drop_in_trigger)
+    -- bu esigi SADECE takili oldugu silahin metadata'sindaki
+    -- trigger_weight_multiplier ile (o silaha OZEL) %40 azaltir.
+    -- Full-auto donusturulmus (glock_switch, full_auto=true) silahlar bu
+    -- oran sinirindan MUAFTIR (gercekci: full-auto zaten hizli atislidir).
+    -- =================================================================
+    if not meta.full_auto then
+        local now = GetGameTimer()
+        local lastShotAt = tonumber(meta.last_shot_at_ms)
+        local effectiveTriggerWeightMs = (Config.Forensics.TriggerWeightMs or 250)
+            * Matrix.Clamp(tonumber(meta.trigger_weight_multiplier) or 1.0, 0.05, 4.0)
+
+        if lastShotAt and (now - lastShotAt) < effectiveTriggerWeightMs then
+            Matrix.Inventory.MergeMetadata(weaponInventoryId, weaponSlot, {
+                last_shot_at_ms = now,
+                jammed          = true
+            })
+            Matrix.Log('FORENSICS',
+                '[MODUL 8][ANTI-MAKRO] slot=%d silah=%s delta=%dms < esik=%.0fms -- silah JAMMED olarak isaretlendi.',
+                weaponSlot, tostring(weaponItemName), now - lastShotAt, effectiveTriggerWeightMs)
+            return { durability = tonumber(meta.durability) or 100.0, jam_probability = 1.0, jammed = true,
+                shots_fired = tonumber(meta.shots_fired) or 0, reason = 'trigger_weight_violation' }
+        end
+    end
+
+
     local shotsFired = (tonumber(meta.shots_fired) or 0) + 1
     local lifespan    = Matrix.Forensics.GetWeaponShotLifespan(weaponItemName)
     local durability  = Matrix.Clamp(100.0 * (1.0 - (shotsFired / lifespan)), 0.0, 100.0)
 
 
-    local jamProbability = Matrix.Forensics.ComputeMechanicalJamProbability(durability)
+    -- ★ MODUL 9: bu spesifik silahin takili modundan gelen delta/carpan.
+    local jamProbability = Matrix.Forensics.ComputeMechanicalJamProbability(
+        durability, meta.jam_threshold_percent_delta, meta.jam_coefficient_multiplier)
 
 
     local accumulator = (tonumber(meta.jam_accumulator) or 0.0) + jamProbability
@@ -487,7 +633,8 @@ function Matrix.Forensics.OnWeaponShotFired(actorRef, weaponItemName, weaponSeri
         shots_fired     = shotsFired,
         durability      = durability,
         jam_accumulator = accumulator,
-        jammed          = jammed
+        jammed          = jammed,
+        last_shot_at_ms = GetGameTimer()
     })
 
 
@@ -567,7 +714,20 @@ function Matrix.Forensics.OnWeaponFired(actorRef, weaponSerial, casingInventoryI
     local weaponDurability = GetWeaponDurability(weaponInventoryId, weaponSlot)
 
 
-    local result = Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, 'casing', weaponDurability)
+    -- ★ MODUL 4: silah item adını çöz (shotgun tespiti icin) -- yalnizca
+    -- OKUMA amaçlı, envanteri MUTASYONA UĞRATMAZ.
+    local weaponItemName = nil
+    if weaponInventoryId and type(weaponSlot) == 'number' then
+        local slotOk, slotItem = pcall(function()
+            return exports['ox_inventory']:GetSlot(weaponInventoryId, weaponSlot)
+        end)
+        if slotOk and type(slotItem) == 'table' and type(slotItem.name) == 'string' then
+            weaponItemName = slotItem.name
+        end
+    end
+
+
+    local result = Matrix.Forensics.SimulateWeaponFire(actorRef, weaponSerial, weaponWear, 'casing', weaponDurability, weaponItemName)
     if not result then return nil end
 
 
@@ -1290,9 +1450,18 @@ function Matrix.Forensics.CollectShells(botId, coords)
     if not IsValidWorldCoords(coords) then return false, 'bad_coords' end
 
 
-    local radius = Config.Forensics.ShellCollectionRadiusMeters or 3.0
+    -- ★ MODUL 2: kovan yarıçapından ayrı, kan delili (biological_blood) daha
+    -- kısa menzilli bir el ile (Config.Forensics.BloodEvidence.
+    -- CollectionRadiusMeters) toplanabilir olduğu için TARAMA yarıçapı
+    -- ikisinden BÜYÜK OLANI kullanır; hangi türün fiilen paketlendiği
+    -- aşağıda satır bazında (row.evidence_type) belirlenir.
+    local bloodCfg = Config.Forensics.BloodEvidence
+    local radius = math.max(
+        Config.Forensics.ShellCollectionRadiusMeters or 3.0,
+        (bloodCfg and bloodCfg.CollectionRadiusMeters) or 0.0
+    )
     local rows = MySQL.query.await([[
-        SELECT id, ballistic_id, coords_x, coords_y, coords_z FROM matrix_forensic_evidence
+        SELECT id, ballistic_id, evidence_type, blood_pool_purity, coords_x, coords_y, coords_z FROM matrix_forensic_evidence
         WHERE coords_x BETWEEN ? AND ? AND coords_y BETWEEN ? AND ? AND coords_z BETWEEN ? AND ?
     ]], {
         coords.x - radius, coords.x + radius,
@@ -1306,7 +1475,16 @@ function Matrix.Forensics.CollectShells(botId, coords)
         local dx = (tonumber(row.coords_x) or 0.0) - coords.x
         local dy = (tonumber(row.coords_y) or 0.0) - coords.y
         local dz = (tonumber(row.coords_z) or 0.0) - coords.z
-        if math.sqrt((dx * dx) + (dy * dy) + (dz * dz)) <= radius then
+        local dist = math.sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+        -- ★ MODUL 2: her kanit turu KENDI yaricapiyla eslesir -- kan
+        -- delilinin (biological_blood) kisa menzili, kovan yaricapina
+        -- gore GENISLETILMEZ.
+        local rowRadius = (row.evidence_type == 'biological_blood')
+            and ((bloodCfg and bloodCfg.CollectionRadiusMeters) or radius)
+            or (Config.Forensics.ShellCollectionRadiusMeters or 3.0)
+
+        if dist <= rowRadius then
             matched[#matched + 1] = row
         end
     end
@@ -1322,11 +1500,27 @@ function Matrix.Forensics.CollectShells(botId, coords)
     local inventoryId = ('dealer_%d'):format(bot.id)
     local collectedCount = 0
     for _, row in ipairs(matched) do
-        local addOk = pcall(function()
-            return exports['ox_inventory']:AddItem(inventoryId, Config.Forensics.ShellCasingEvidenceItem, 1, {
+        local itemName, metadata
+        if row.evidence_type == 'biological_blood' then
+            -- ★ MODUL 2: kan delili AYRI bir ox_inventory item'i olarak
+            -- paketlenir -- kovan (casing) item'iyla KARIŞTIRILMAZ.
+            itemName = (bloodCfg and bloodCfg.Item) or 'blood_evidence_sample'
+            metadata = {
+                ballistic_id       = row.ballistic_id,
+                blood_pool_purity  = tonumber(row.blood_pool_purity) or 0.0,
+                description        = ('[TOPLANMIS KAN ORNEGI]\nIz ID: %s\nSaflik: %.3f\nAdli kayit fiziksel olarak imha edildi.')
+                    :format(row.ballistic_id, tonumber(row.blood_pool_purity) or 0.0)
+            }
+        else
+            itemName = Config.Forensics.ShellCasingEvidenceItem
+            metadata = {
                 ballistic_id = row.ballistic_id,
                 description  = ('[TOPLANMIS KOVAN]\nBalistik ID: %s\nAdli kayit fiziksel olarak imha edildi.'):format(row.ballistic_id)
-            })
+            }
+        end
+
+        local addOk = pcall(function()
+            return exports['ox_inventory']:AddItem(inventoryId, itemName, 1, metadata)
         end)
         if addOk then
             MySQL.prepare('DELETE FROM matrix_forensic_evidence WHERE id = ?', { row.id })
@@ -1729,4 +1923,73 @@ CreateThread(function()
 end)
 
 exports('TickEvidenceDecayHourly', function() return Matrix.Forensics.TickEvidenceDecayHourly() end)
+
+-- =====================================================================
+-- MODUL 2: KAN DELİLİ LİNEER ERİME + 2 SAATLİK OTONOM SÜPÜRME
+-- Genel (asimptotik/exp) kanıt erimesinden AYRI bir döngü -- görev
+-- talimatı kan delili saflığının LİNEER azalmasını istiyor. Kendi
+-- CreateThread'i icinde, ana ticker'i ASLA bloklamaz.
+-- =====================================================================
+function Matrix.Forensics.TickBloodEvidenceDecay()
+    local cfg = Config.Forensics.BloodEvidence
+    local ok, affected = pcall(function()
+        return MySQL.update.await([[
+            UPDATE matrix_forensic_evidence
+            SET blood_pool_purity = GREATEST(0.0, blood_pool_purity - ?)
+            WHERE evidence_type = 'biological_blood'
+              AND sealed_as_crime_weapon = 0
+              AND blood_pool_purity IS NOT NULL
+        ]], { cfg.DecayAmountPerInterval })
+    end)
+    if ok then
+        Matrix.Log('FORENSICS', '[KAN DELİLİ][LİNEER ERİME] -%.3f saflik uygulandi (etkilenen=%s).',
+            cfg.DecayAmountPerInterval, tostring(affected or '?'))
+    else
+        Matrix.Log('FORENSICS', '[HATA] TickBloodEvidenceDecay UPDATE basarisiz (yutuldu).')
+    end
+end
+
+
+function Matrix.Forensics.PurgeDecayedBloodEvidence()
+    local cfg = Config.Forensics.BloodEvidence
+    local ok, affected = pcall(function()
+        return MySQL.update.await(
+            ('DELETE FROM matrix_forensic_evidence WHERE evidence_type = ? AND sealed_as_crime_weapon = 0 AND created_at < (NOW() - INTERVAL %d SECOND)')
+                :format(math.floor(cfg.MaxAgeSeconds)),
+            { 'biological_blood' }
+        )
+    end)
+    if not ok then
+        Matrix.Log('FORENSICS', '[HATA] PurgeDecayedBloodEvidence DELETE basarisiz (yutuldu).')
+        return 0
+    end
+    local n = tonumber(affected) or 0
+    if n > 0 then
+        Matrix.Log('FORENSICS', '[KAN DELİLİ][2SAAT SÜPÜRME] %d eski kan delili satiri kalici olarak silindi.', n)
+    end
+    return n
+end
+
+
+-- Ayri, non-blocking thread -- 30 dakikada bir hem lineer erime hem de
+-- 2 saatlik yas temizligi calisir.
+CreateThread(function()
+    while true do
+        Wait(Config.Forensics.BloodEvidence.DecayIntervalMs)
+
+        local ok1, err1 = pcall(Matrix.Forensics.TickBloodEvidenceDecay)
+        if not ok1 then
+            Matrix.Log('FORENSICS', '[HATA] TickBloodEvidenceDecay basarisiz (yutuldu): %s', tostring(err1))
+        end
+
+        local ok2, err2 = pcall(Matrix.Forensics.PurgeDecayedBloodEvidence)
+        if not ok2 then
+            Matrix.Log('FORENSICS', '[HATA] PurgeDecayedBloodEvidence basarisiz (yutuldu): %s', tostring(err2))
+        end
+    end
+end)
+
+exports('RecordBloodEvidence', function(victimDnaId, attackerDnaId, coords, cortisolLevel, fatigueLevel)
+    return Matrix.Forensics.RecordBloodEvidence(victimDnaId, attackerDnaId, coords, cortisolLevel, fatigueLevel)
+end)
 exports('PurgeDecayedEvidence',    function() return Matrix.Forensics.PurgeDecayedEvidence() end)
