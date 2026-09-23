@@ -363,6 +363,41 @@ RegisterNetEvent('matrix:client:hudSnapshot', function(lines)
 end)
 
 
+-- =====================================================================
+-- ★★★ [ADLİ BULGU / DÜZELTME] RENDER THREAD — GERÇEKTEN HİÇ YAZILMAMIŞTI ★★★
+-- Yukarıdaki yorum "bkz. aşağıdaki RENDER THREAD" diyordu ama böyle bir
+-- thread dosyada HİÇ VAR OLMAMIŞTI: hudActive/hudLines doğru şekilde
+-- ayarlanıyor (ToggleHud, hudSnapshot) ama hiçbir yerde EKRANA ÇİZİLMİYORDU
+-- -- F6'ya basmak durumu değiştiriyordu ama görünürde HİÇBİR ŞEY
+-- OLMUYORDU ("F6 menü gözükmüyor" olarak gözlemlenen davranışın gerçek
+-- kök nedeni budur; F10 menüsünün eksik montajıyla AYNI SINIF bir
+-- eksiklik, farklı bir dosya bölümünde). hudActive=false iken thread
+-- Wait(500) ile bekler (0 ResMon), aktifken normal HUD çizim maliyeti
+-- (her frame) uygulanır -- herhangi bir FiveM HUD'unun standart maliyeti.
+-- =====================================================================
+CreateThread(function()
+    while true do
+        if hudActive then
+            local y = 0.04
+            for i = 1, #hudLines do
+                local line = hudLines[i]
+                local r, g, b, scale = COLOR_VALUE[1], COLOR_VALUE[2], COLOR_VALUE[3], 0.33
+                if line.header then
+                    r, g, b, scale = COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3], 0.38
+                elseif line.danger then
+                    r, g, b, scale = COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3], 0.33
+                end
+                DrawMonoLine(0.015, y, line.text, r, g, b, scale)
+                y = y + 0.0215
+            end
+            Wait(0)
+        else
+            Wait(500)
+        end
+    end
+end)
+
+
 RegisterCommand('hud', function()
     ToggleHud()
 end, false)
