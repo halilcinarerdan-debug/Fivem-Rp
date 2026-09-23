@@ -1410,6 +1410,28 @@ Config.TacticalTourniquet = {
     ComaExtensionSeconds = 2 * 3600
 }
 
+-- =====================================================================
+-- ★ [MODUL 14] SUNUCU AGI TIMEOUT KORUMASI + GECIKMELI ADLI PAKET TAMPONU
+-- =====================================================================
+Config.NetworkGuard = {
+    -- Sunucu bu araliktA TUM istemcilere hafif bir kalp atisi (heartbeat)
+    -- event'i yayinlar -- client/hud.lua bunun ZAMAN DAMGASINI tutar.
+    HeartbeatIntervalMs   = 5000,
+    -- Client bu sureden UZUN suredir bir heartbeat ALMADIYSA ag hattini
+    -- "riskli/tikanik" sayar -- adli event'ler DOGRUDAN gonderilmez,
+    -- LocalAdliBuffer'a mühürlenir.
+    HeartbeatTimeoutMs    = 12000,
+    -- ★ client/hud.lua LocalAdliBuffer -- RAM-bomb korumali FIFO tampon
+    -- kapasitesi (bu limitin USTUNDEKI en eski kayit sessizce dusurulur).
+    LocalBufferMaxEntries = 32,
+    -- matrix_diagnostics.lua onServerResourceStart taramasi (FastChecks +
+    -- DbChecks + SimulationChecks) bu KADAR kontrolde bir Wait(0) ile ana
+    -- ag/tick dongusune GERI VERIR -- txAdmin/master-list poller'lari
+    -- (dynamic.json/players.json/info.json) uzun, kesintisiz bir
+    -- INFORMATION_SCHEMA sorgu patlamasi tarafindan AC BIRAKILMAZ.
+    DiagnosticsYieldEveryNChecks = 5
+}
+
 -- ---------------------------------------------------------------------
 -- [KATMAN 2] YASAL HASTANE (EMS) ADLİ SORGU / TIBBİ SIZINTI DÖNGÜSÜ
 -- Karakter Wipe kararı, ZATEN VAR OLAN /davaac + /davasorgula mahkeme

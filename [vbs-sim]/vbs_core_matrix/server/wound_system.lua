@@ -456,9 +456,15 @@ end
 
 -- =====================================================================
 -- [KATMAN 2] OYUNCU-HASAR KANCA
+--
+-- ★ [MODUL 14.2] TEK YETKILI ProcessWoundReport: hem canli event'ten
+-- (isDelayed=false) hem de client/hud.lua LocalAdliBuffer'inin agir
+-- baglanti kesintisi sonrasi gonderdigi 'Delayed Batch Sync' paketinden
+-- (isDelayed=true, originalTs = client'in o anki os.time() damgasi)
+-- CAGRILIR -- ikinci bir "hasar isleme" yolu ICAT EDILMEZ. Zaman damgasi
+-- gecmise donuk olsa dahi ayni ACID INSERT/UPDATE disiplini uygulanir.
 -- =====================================================================
-RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId, attackerWeaponHash)
-    local src = source
+local function ProcessWoundReport(src, attackerServerId, attackerWeaponHash, isDelayed, originalTs)
     if type(src) ~= 'number' or src <= 0 then return end
 
     local state = Matrix.GetOrCreatePlayerState(src)
@@ -508,7 +514,54 @@ RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId,
     state.has_wound          = true
     state.wound_ballistic_id = ballisticId
 
-    Matrix.Log('WOUNDS', '[YARALANMA] %s balistik-imza #%s ile yaralandi.', state.citizenid, tostring(ballisticId))
+    if isDelayed then
+        Matrix.Log('WOUNDS',
+            '[GECIKMELI ADLI IZ] %s balistik-imza #%s ile yaralandi (istemci zaman damgasi: %s, agir baglanti kesintisi sonrasi toplu senkron).',
+            state.citizenid, tostring(ballisticId), tostring(originalTs))
+    else
+        Matrix.Log('WOUNDS', '[YARALANMA] %s balistik-imza #%s ile yaralandi.', state.citizenid, tostring(ballisticId))
+    end
+end
+
+RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId, attackerWeaponHash)
+    local src = source
+    ProcessWoundReport(src, attackerServerId, attackerWeaponHash, false, nil)
+end)
+
+-- =====================================================================
+-- ★ [MODUL 14.2] GECIKMELI TOPLU SENKRON (Delayed Batch Sync) --
+-- client/hud.lua LocalAdliBuffer'inin (agir baglanti kesintisi/timeout
+-- riski sirasinda kordugu, FIFO + 32 paket tavanli) tampon icerigini
+-- ag hatti normale doner donmez TEK bir event ile gonderir. Her kayit
+-- BAGIMSIZ olarak, AYNI ProcessWoundReport disipliniyle (ACID insert/
+-- update) islenir -- kismi yazim YOK. RAM-bomb korumasi: 32 kayittan
+-- fazlasi (client tarafi zaten sinirlar, ama sunucu tarafi da GUVENMEZ)
+-- SESSIZCE KIRPILIR.
+-- =====================================================================
+local MAX_DELAYED_BATCH_RECORDS = 32
+
+RegisterNetEvent('matrix:server:reportPlayerWoundedBatch', function(records)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if type(records) ~= 'table' then return end
+
+    local processed = 0
+    for i, rec in ipairs(records) do
+        if i > MAX_DELAYED_BATCH_RECORDS then break end
+        if type(rec) == 'table' then
+            local ok, err = pcall(ProcessWoundReport, src, rec.attacker_server_id, rec.weapon_hash, true, rec.ts)
+            if ok then
+                processed = processed + 1
+            else
+                Matrix.Log('WOUNDS', '[HATA] Gecikmeli paket #%d islenemedi (yutuldu): %s', i, tostring(err))
+            end
+        end
+    end
+
+    if processed > 0 then
+        Matrix.Log('WOUNDS', '[GECIKMELI ADLI IZ] src=%d -- %d/%d tamponlanmis paket ACID butunlugu ile islendi.',
+            src, processed, math.min(#records, MAX_DELAYED_BATCH_RECORDS))
+    end
 end)
 
 -- =====================================================================

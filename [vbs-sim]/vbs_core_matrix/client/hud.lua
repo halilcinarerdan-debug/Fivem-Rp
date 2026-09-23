@@ -563,6 +563,91 @@ RegisterKeyMapping('silahtahliye', 'Sikisan Silahi Tahliye Et (Tutukluk Giderme)
 
 
 -- =====================================================================
+-- ★ [MODUL 14.2] ISTEMCI TARAFLI ADLI PAKET TAMPONU (Delayed Buffer Sync)
+-- Ag kilitlenmeleri/timeout riski sirasinda sunucuya giden hasar/bayiltma
+-- event'lerinin (matrix:server:reportPlayerWounded) havada dusup adli iz
+-- birakmadan kaybolmasini ONLER. server/matrix_diagnostics.lua'nin
+-- yayinladigi 'matrix:client:networkHeartbeat' zaman damgasi izlenir --
+-- bu sure Config.NetworkGuard.HeartbeatTimeoutMs'i asarsa ag hatti
+-- "riskli/tikanik" sayilir ve event KORLEMESINE gonderilmez, bunun
+-- yerine LocalAdliBuffer'a (FIFO, Config.NetworkGuard.LocalBufferMaxEntries
+-- tavanli -- RAM-bomb korumali, en eski kayit sessizce dusurulur)
+-- muhurlenir. Ag hatti normale doner donmez tampon TEK bir toplu paket
+-- (Delayed Batch Sync) halinde 'matrix:server:reportPlayerWoundedBatch'
+-- ile sunucuya gonderilir.
+-- =====================================================================
+local LocalAdliBuffer   = {}
+local LastHeartbeatAt   = GetGameTimer()
+local WasNetworkHealthy = true
+
+RegisterNetEvent('matrix:client:networkHeartbeat', function()
+    LastHeartbeatAt = GetGameTimer()
+end)
+
+local function IsNetworkHealthy()
+    local timeoutMs = (Config.NetworkGuard and Config.NetworkGuard.HeartbeatTimeoutMs) or 12000
+    return (GetGameTimer() - LastHeartbeatAt) <= timeoutMs
+end
+
+local function PushToLocalAdliBuffer(record)
+    local maxEntries = (Config.NetworkGuard and Config.NetworkGuard.LocalBufferMaxEntries) or 32
+    LocalAdliBuffer[#LocalAdliBuffer + 1] = record
+    -- ★ RAM-bomb korumasi: tavan asilirsa EN ESKI kayit (FIFO basi)
+    -- sessizce dusurulur -- tampon sinirsiz BUYUMEZ.
+    while #LocalAdliBuffer > maxEntries do
+        table.remove(LocalAdliBuffer, 1)
+    end
+end
+
+local function FlushLocalAdliBuffer()
+    if #LocalAdliBuffer == 0 then return end
+    TriggerServerEvent('matrix:server:reportPlayerWoundedBatch', LocalAdliBuffer)
+    LocalAdliBuffer = {}
+end
+
+--- ★ Guvenli sarmalayici: ag hatti SAGLIKLIYSA DOGRUDAN gonderir (mevcut
+--- davranis DEGISMEZ); DEGILSE korlemesine firlatmak yerine yerel
+--- tampona muhurler. Sagliga DONUS aninda tampon TOPLU olarak bosaltilir.
+local function ReportWoundedSafe(attackerServerId, weaponHashStr)
+    local healthy = IsNetworkHealthy()
+
+    if healthy and not WasNetworkHealthy then
+        FlushLocalAdliBuffer()
+    end
+    WasNetworkHealthy = healthy
+
+    if healthy then
+        TriggerServerEvent('matrix:server:reportPlayerWounded', attackerServerId, weaponHashStr)
+    else
+        local ped = PlayerPedId()
+        local coords = ped and ped ~= 0 and GetEntityCoords(ped) or nil
+        PushToLocalAdliBuffer({
+            attacker_server_id = attackerServerId,
+            weapon_hash         = weaponHashStr,
+            coords_x            = coords and coords.x or 0.0,
+            coords_y            = coords and coords.y or 0.0,
+            coords_z            = coords and coords.z or 0.0,
+            ts                  = os.time()
+        })
+    end
+end
+
+-- ★ Ag hatti saglikliyken de periyodik olarak kontrol eder -- sadece
+-- yeni bir hasar event'i geldiginde degil, sagliga DONUS anini da
+-- YAKALAR (ornegin oyuncu o sure icinde hic hasar almadiysa bile tampon
+-- bir sonraki saglikli tick'te bosaltilir).
+CreateThread(function()
+    while true do
+        Wait(2000)
+        local healthy = IsNetworkHealthy()
+        if healthy and not WasNetworkHealthy then
+            FlushLocalAdliBuffer()
+        end
+        WasNetworkHealthy = healthy
+    end
+end)
+
+-- =====================================================================
 -- ★ YERALTI GENISLETMESI KATMAN 2: OYUNCU-HASAR TESPITI
 -- Vanilla 'CEventNetworkEntityDamage' gameEventTriggered'i, yerel oyuncu
 -- kurbanken YALNIZCA sunucuya bir bildirim gonderir -- server/wound_
@@ -586,7 +671,7 @@ AddEventHandler('gameEventTriggered', function(eventName, args)
     end
 
     local weaponHashStr = weaponHash and tostring(weaponHash) or nil
-    TriggerServerEvent('matrix:server:reportPlayerWounded', attackerServerId, weaponHashStr)
+    ReportWoundedSafe(attackerServerId, weaponHashStr)
 end)
 
 
