@@ -43,6 +43,9 @@ server_scripts {
     'server/gang_hoods.lua',
     'server/mercenary_followers.lua',
     'server/hitsquad.lua',
+    -- ★ [MODUL 15] Matrix.Logistics.OnDealerEliminated (server/logistics.
+    -- lua, YUKARIDA yuklu) SARMALANIR -- bu dosya ONDAN SONRA gelmelidir.
+    'server/team_ai.lua',
     'server/phone_bridge.lua',         -- ✅ Diagnostics'TEN ÖNCE
     'server/matrix_diagnostics.lua'    -- ✅ EN SON (kilit nokta)
 }

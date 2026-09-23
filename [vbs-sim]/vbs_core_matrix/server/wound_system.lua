@@ -218,6 +218,37 @@ function Matrix.Wounds.ApplyBotRegionalDamage(botId, rawDamage, forcedZone)
         Matrix.Log('WOUNDS',
             '[GOVDE YARASI] Bot #%d -- kortizol kilitli, denetim anomali +%%%d, stash hirsizligi tetiklendi.',
             botId, math_floor(((Config.BotWounds.TorsoAuditAnomalyMultiplier or 3.0) - 1.0) * 100))
+
+        -- =================================================================
+        -- ★ [MODUL 15.2] KAYIP VE KANIT KARARTMA PROTOKOLU (Casualty
+        -- Protocol) -- gövde yarasi (bu bot "yere yigildi") ANINDA, AKTIF
+        -- bir sevkte (Matrix.Dispatches[botId]) OpenAI'in /timeemir ile
+        -- atadigi dispatch.ai_fsm_matrix.casualty_protocol MEVCUTSA
+        -- deterministik olarak dallanir -- alan YOKSA (AI emri hic
+        -- verilmemis) HICBIR SEY DEGISMEZ (TAMAMEN ADDITIVE).
+        -- =================================================================
+        local dispatch = Matrix.Dispatches and Matrix.Dispatches[botId]
+        if dispatch and dispatch.ai_fsm_matrix then
+            local protocol = dispatch.ai_fsm_matrix.casualty_protocol
+            local netId = bot.state and bot.state.net_id
+            local casualtyPed = (type(netId) == 'number' and netId > 0) and NetworkGetEntityFromNetworkId(netId) or nil
+
+            if protocol == 'carry' and casualtyPed and casualtyPed ~= 0 and DoesEntityExist(casualtyPed) then
+                local vehNetId = dispatch.vehicle_net_id
+                local vehicle = (type(vehNetId) == 'number' and vehNetId > 0) and NetworkGetEntityFromNetworkId(vehNetId) or nil
+                if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+                    local ok = pcall(TaskPutPedDirectlyIntoVehicle, casualtyPed, vehicle, -1)
+                    Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "carry" emriyle araca yuklendi (basarili:%s).', botId, tostring(ok))
+                end
+            elseif protocol == 'purge_evidence' and casualtyPed and casualtyPed ~= 0 and DoesEntityExist(casualtyPed) then
+                local coords = GetEntityCoords(casualtyPed)
+                local collectOk = pcall(Matrix.Forensics.CollectShells, botId, coords)
+                Matrix.Log('WOUNDS', '[KAYIP PROTOKOLU] Bot #%d "purge_evidence" emriyle olay yeri kazindi (basarili:%s), otonom kacis.', botId, tostring(collectOk))
+                if Matrix.CompleteDispatch then
+                    pcall(Matrix.CompleteDispatch, botId, 'panic_recall')
+                end
+            end
+        end
     end
 
     Matrix.Wounds.Bots[botId] = w

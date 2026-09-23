@@ -1432,6 +1432,28 @@ Config.NetworkGuard = {
     DiagnosticsYieldEveryNChecks = 5
 }
 
+-- =====================================================================
+-- ★ [MODUL 15] OPENAI TABANLI STRATEJIK MUHAKEME + OTONOM TIM KOMUTASI
+-- server/team_ai.lua. OpenAI kimlik bilgisi Config.AI_Matrix_Brain
+-- (server/bureau.lua Matrix.Bureau.RunAIAdvisoryPass ile AYNI provider/
+-- apiKey/model) YENIDEN KULLANILIR -- ikinci bir "OpenAI anahtari" ICAT
+-- EDILMEZ.
+-- =====================================================================
+Config.TeamAI = {
+    ValidTeams = { alfa = true, bravo = true },
+
+    -- AI yaniti eksik/gecersiz/HTTP hatali donerse (veya Config.
+    -- AI_Matrix_Brain.apiKey yapilandirilmamissa) BU deterministik
+    -- varsayilana DUSER -- ASLA math.random ile "tahmin" edilmez.
+    DefaultDirective = {
+        sneak_mode        = false,
+        lspd_engagement   = 'flee',
+        casualty_protocol = 'carry'
+    },
+
+    Model = 'gpt-4o-mini'
+}
+
 -- ---------------------------------------------------------------------
 -- [KATMAN 2] YASAL HASTANE (EMS) ADLİ SORGU / TIBBİ SIZINTI DÖNGÜSÜ
 -- Karakter Wipe kararı, ZATEN VAR OLAN /davaac + /davasorgula mahkeme

@@ -1385,15 +1385,48 @@ function Matrix.TickPhysicalDispatches()
                         end
                     end
 
-                    if veryClose then
-                        dispatch.police_dwell = dispatch.police_dwell + 1
-                    else
-                        dispatch.police_dwell = math_max(0, dispatch.police_dwell - 1)
+                    -- =========================================================
+                    -- ★ [MODUL 15.2] LEO VETTING V2 -- OpenAI'in /timeemir ile
+                    -- atadigi dispatch.ai_fsm_matrix.lspd_engagement MEVCUTSA,
+                    -- deterministik olarak dallanir. Alan YOKSA (AI emri hic
+                    -- verilmemis) mevcut police_dwell/busted mantigi DEGISMEDEN
+                    -- calisir -- bu blok TAMAMEN ADDITIVE'dir.
+                    -- =========================================================
+                    if policeNearby and dispatch.ai_fsm_matrix then
+                        local engagement = dispatch.ai_fsm_matrix.lspd_engagement
+                        if engagement == 'flee' then
+                            Matrix.Log('CORE', '[LEO VETTING V2] Bot #%d -- AI emri "flee", panik geri cekilme tetiklendi.', botId)
+                            toComplete[botId] = 'panic_recall'
+                        elseif engagement == 'attack' and veryClose then
+                            local nearestOfficerPed, nearestOfficerDist = nil, math_huge
+                            for policeSrc in pairs(PoliceSources) do
+                                local officerPed = GetPlayerPed(policeSrc)
+                                if officerPed and officerPed ~= 0 then
+                                    local d = #(GetEntityCoords(officerPed) - coords)
+                                    if d < nearestOfficerDist then
+                                        nearestOfficerPed, nearestOfficerDist = officerPed, d
+                                    end
+                                end
+                            end
+                            if nearestOfficerPed then
+                                pcall(TaskCombatPed, ped, nearestOfficerPed, 0, 16)
+                            end
+                        end
+                    end
+
+                    if not toComplete[botId] then
+                        if veryClose then
+                            dispatch.police_dwell = dispatch.police_dwell + 1
+                        else
+                            dispatch.police_dwell = math_max(0, dispatch.police_dwell - 1)
+                        end
                     end
 
                     if dispatch.police_dwell >= DISPATCH_BUSTED_DWELL_TICKS then
                         Matrix.Log('CORE', '[PUSU] Bot #%d polis tarafından kuşatıldı.', botId)
-                        toComplete[botId] = 'busted'
+                        -- ★ [MODUL 15.2] AI'in bu tick'te ZATEN atadigi bir
+                        -- tamamlama sebebini (orn. 'panic_recall') EZMEZ.
+                        toComplete[botId] = toComplete[botId] or 'busted'
                     else
                         if dispatch.plate then
                             for trapId, trapHouse in pairs(Matrix.TrapHouses or {}) do
