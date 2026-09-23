@@ -539,6 +539,125 @@ RegisterNetEvent('matrix:server:reportSuppression', function(intensity)
 end)
 
 -- =====================================================================
+-- ★ [MODUL 13.1] MUHAREBE STRESI (PANIK) VE EMIR REDDI
+-- Histerezis: bot.state.panicking=true iken cortisol_level Config.
+-- CombatPanic.CalmCortisolThreshold ALTINA dusmeden panicking=false
+-- OLMAZ -- RefusalCortisolThreshold'un ANLIK altina/ustune salinimi
+-- "yeniden itaat" SAYILMAZ (gorev talimati acikca boyle istiyor).
+-- server/mercenary_followers.lua taktik emir atamasindan ONCE bunu
+-- probe eder.
+-- =====================================================================
+function Matrix.Wounds.IsBotPanicking(botId)
+    local bot = Matrix.Bots[botId]
+    if not bot or not bot.biology then return false end
+
+    local cortisol = bot.biology.cortisol_level or 0.0
+    bot.state = bot.state or {}
+
+    if bot.state.panicking then
+        if cortisol < (Config.CombatPanic.CalmCortisolThreshold or 0.60) then
+            bot.state.panicking = false
+        end
+    else
+        if cortisol >= (Config.CombatPanic.RefusalCortisolThreshold or 0.85) then
+            bot.state.panicking = true
+        end
+    end
+
+    return bot.state.panicking == true
+end
+
+-- =====================================================================
+-- ★ [MODUL 13.3] TAKTIK TURNIKE PROTOKOLU
+-- Kompleks tibbi kit/igne YOK -- tek mudahale araci Config.
+-- TacticalTourniquet.Item. Agir uzuv hasari alan (leg_injury>0 veya
+-- arm_injury>0) bir bota, ApplyRadiusMeters icinden basarili mudahalede:
+--   * leg/arm_injury InjuryReductionPct ORANIYLA sonumlenir (kalici
+--     sakatlik esigine girme ihtimali dusurulur, TAMAMEN sifirlanmaz).
+--   * bot.state.panicking=false (emirlere yeniden itaat).
+--   * KOMA MODUNDAYSA (server/bureau.lua KOR NOKTA) Matrix.Bureau.
+--     ExtendComaClock ile deceased-arsivleme sayaci ERTELENIR -- koma
+--     IYILESTIRILMEZ (biz bir sagli ekibi degiliz).
+--   * ADLI IZ: tuketilen turnike kumasina bulasan kan icin EK, yuksek
+--     saflikli (cortisol=0,fatigue=0 -> purity=1.0, RNG YOK) bir
+--     biological_blood satiri (MODUL 2 ile AYNI RecordBloodEvidence).
+-- =====================================================================
+function Matrix.Wounds.ApplyTourniquet(src, botId)
+    if type(src) ~= 'number' or src <= 0 then return false, 'bad_src' end
+    botId = tonumber(botId)
+    local bot = botId and Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    local w = GetOrInitBotWound(botId)
+    local wasComatose = (bot.status == 'comatose')
+
+    if not wasComatose and w.leg_injury <= 0.0 and w.arm_injury <= 0.0 then
+        return false, 'no_wound'
+    end
+
+    local ped = GetPlayerPed(src)
+    local netId = bot.state and bot.state.net_id
+    local botPed = (type(netId) == 'number' and netId > 0) and NetworkGetEntityFromNetworkId(netId) or nil
+    if not ped or ped == 0 or not botPed or botPed == 0 or not DoesEntityExist(botPed) then
+        return false, 'not_nearby'
+    end
+
+    local dist = VectorDistance(GetEntityCoords(ped), GetEntityCoords(botPed))
+    if dist > (Config.TacticalTourniquet.ApplyRadiusMeters or 2.0) then
+        return false, 'not_nearby'
+    end
+
+    local removeOk, removeResult = pcall(function()
+        return exports['ox_inventory']:RemoveItem(src, Config.TacticalTourniquet.Item, 1)
+    end)
+    if not removeOk or removeResult ~= true then return false, 'item_missing' end
+
+    local pct = Matrix.Clamp(Config.TacticalTourniquet.InjuryReductionPct or 0.50, 0.0, 1.0)
+    w.leg_injury = Matrix.Clamp(w.leg_injury * (1.0 - pct), 0.0, 1.0)
+    w.arm_injury = Matrix.Clamp(w.arm_injury * (1.0 - pct), 0.0, 1.0)
+    PersistBotWound(botId, w)
+
+    bot.state = bot.state or {}
+    bot.state.panicking = false
+
+    local comaExtended = false
+    if wasComatose and Matrix.Bureau and type(Matrix.Bureau.ExtendComaClock) == 'function' then
+        local ok = Matrix.Bureau.ExtendComaClock(botId, Config.TacticalTourniquet.ComaExtensionSeconds or 7200)
+        comaExtended = (ok == true)
+    end
+
+    if Matrix.Forensics and type(Matrix.Forensics.RecordBloodEvidence) == 'function' then
+        local coords = GetEntityCoords(botPed)
+        pcall(Matrix.Forensics.RecordBloodEvidence, bot.dna_id or 'UNKNOWN', 'TOURNIQUET', coords, 0.0, 0.0)
+    end
+
+    Matrix.Log('WOUNDS', '[TURNIKE] src=%d bot #%d icin turnike uyguladi (koma-erteleme:%s).',
+        src, botId, tostring(comaExtended))
+    return true, comaExtended
+end
+
+RegisterNetEvent('matrix:server:wounds:applyTourniquet', function(botId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+
+    local ok, resultOrReason = Matrix.Wounds.ApplyTourniquet(src, botId)
+    if ok then
+        TriggerClientEvent('matrix:client:actionNotify', src, true, resultOrReason
+            and '[TURNIKE] Kanama durduruldu, koma sayaci ertelendi.'
+            or '[TURNIKE] Kanama durduruldu.')
+    else
+        local msg = (resultOrReason == 'no_wound') and 'Bu botun turnike gerektiren bir yarasi yok.'
+            or (resultOrReason == 'not_nearby') and 'Turnike icin bota daha yakin olmalisiniz.'
+            or (resultOrReason == 'item_missing') and 'Envanterinizde Taktik Turnike yok.'
+            or 'Turnike uygulanamadi.'
+        TriggerClientEvent('matrix:client:actionNotify', src, false, msg)
+    end
+end)
+
+exports('ApplyTourniquet', function(src, botId) return Matrix.Wounds.ApplyTourniquet(src, botId) end)
+exports('IsBotPanicking', function(botId) return Matrix.Wounds.IsBotPanicking(botId) end)
+
+-- =====================================================================
 -- [KATMAN 2] /tedaviol — Yasal Hastane Check-In + Adli Sorgu
 -- =====================================================================
 local BedsideSessions = {}

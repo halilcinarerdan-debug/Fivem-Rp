@@ -1366,6 +1366,50 @@ Config.Mercenary = {
     GuardScenario         = 'WORLD_HUMAN_GUARD_STAND'
 }
 
+-- =====================================================================
+-- ★ [MODUL 13] MUHAREBE STRESI (PANIK) + TAKTIK MUHABERE + TURNIKE
+-- =====================================================================
+Config.CombatPanic = {
+    -- >= bu esikte bot F10/G/H taktik emirlerini (hold/guard/attack/follow)
+    -- ANINDA REDDEDER. RNG YOK -- bot.biology.cortisol_level (ZATEN VAR
+    -- OLAN alan, MODUL 7 suppression ile AYNI) uzerinden okunur.
+    RefusalCortisolThreshold = 0.85,
+    -- Histerezis: panicking=true iken cortisol bu esigin ALTINA
+    -- dusmeden itaat GERI GELMEZ (RefusalCortisolThreshold'un ANLIK
+    -- altina/ustune salinimi "yeniden itaat" SAYILMAZ).
+    CalmCortisolThreshold    = 0.60
+}
+
+Config.CommsLink = {
+    -- Bu mesafe ICINDE sesli komut gecerlidir -- telsiz/Acik Hat
+    -- ARANMAZ.
+    PhysicalCommandRadius = 8.0,
+    -- Config.BlackMarket'teki (bm_burner) ile AYNI item -- ikinci bir
+    -- "telefon" ICAT EDILMEZ.
+    BurnerPhoneItem       = 'burner_phone',
+    -- Bot/ekip bu esigin USTUNDE siber parazit/kor-bolge altindaysa
+    -- (server/logistics.lua Config.Logistics.DeadZones ile AYNI harita)
+    -- komut BOTA HIC ULASMAZ.
+    StaticBlockThreshold  = 0.70,
+    -- DeadZone icindeki botlar icin sabit statik parazit degeri (RNG
+    -- YOK) -- StaticBlockThreshold'u asar, komutu bloke eder.
+    DeadZoneStaticValue   = 1.0
+}
+
+Config.TacticalTourniquet = {
+    Item                 = 'tactical_tourniquet',
+    ApplyRadiusMeters    = 2.0,
+    ApplyDurationMs      = 6000,
+    -- Basarili mudahalede leg_injury/arm_injury bu oranla carpanla
+    -- KUCULTULUR (leg_injury * (1 - Pct)) -- kalici sakatlik esigine
+    -- (Config.BotWounds.CripplingThreshold) girme ihtimali dusurulur.
+    InjuryReductionPct   = 0.50,
+    -- server/bureau.lua [KOR NOKTA] KOMA MODU'nun 2 saatlik
+    -- deceased-arsivleme sayacini (ComaClock) ERTELEMEK icin kullanilir
+    -- -- YENI bir "olum sayaci" ICAT EDILMEZ, MEVCUT olan uzatilir.
+    ComaExtensionSeconds = 2 * 3600
+}
+
 -- ---------------------------------------------------------------------
 -- [KATMAN 2] YASAL HASTANE (EMS) ADLİ SORGU / TIBBİ SIZINTI DÖNGÜSÜ
 -- Karakter Wipe kararı, ZATEN VAR OLAN /davaac + /davasorgula mahkeme

@@ -234,8 +234,159 @@ AddEventHandler('playerDropped', function()
 end)
 
 
+-- =====================================================================
+-- ★ [MODUL 13.2] TAKTIK MUHABERE (COMMS LINK) GUARD
+-- =====================================================================
+local VALID_TASK_MODES_SERVER = { hold = true, guard = true, observe = true, follow = true, attack = true }
+
+local function IsCoordsInDeadZone(coords)
+    if not coords then return false end
+    for _, zone in ipairs(Config.Logistics.DeadZones or {}) do
+        local dx, dy = coords.x - zone.coords.x, coords.y - zone.coords.y
+        if math.sqrt(dx * dx + dy * dy) <= zone.radius then return true end
+    end
+    return false
+end
+
+local function HasActiveBurnerPhone(src)
+    local ok, count = pcall(function()
+        return exports['ox_inventory']:Search(src, 'count', Config.CommsLink.BurnerPhoneItem or 'burner_phone')
+    end)
+    return ok and type(count) == 'number' and count > 0
+end
+
+--- ★ SAF/SENKRON KANCA: bir komutanin (commanderSrc) bir bota (botId)
+--- emir ULASTIRABILIP ULASTIRAMAYACAGINI belirler.
+---   * Config.CommsLink.PhysicalCommandRadius ICINDE ise HER ZAMAN
+---     gecerli -- telsiz/Acik Hat ARANMAZ.
+---   * Radius DISINDA ise commanderSrc'nin AKTIF bir Acik Hat
+---     (burner_phone) sahibi OLMASI VE botun bulundugu koordinatin bir
+---     Dead Zone (Config.Logistics.DeadZones ile AYNI harita, ikinci bir
+---     "kor bolge" listesi ICAT EDILMEZ) ICINDE OLMAMASI GEREKIR.
+function Matrix.Mercenary.CanReachBot(commanderSrc, botId)
+    local bot = Matrix.Bots[botId]
+    if not bot then return false, 'bot_missing' end
+
+    local netId = bot.state and bot.state.net_id
+    local botPed = (type(netId) == 'number' and netId > 0) and NetworkGetEntityFromNetworkId(netId) or nil
+    if not botPed or botPed == 0 or not DoesEntityExist(botPed) then return false, 'bot_unreachable' end
+
+    local commanderPed = GetPlayerPed(commanderSrc)
+    if not commanderPed or commanderPed == 0 then return false, 'commander_unresolved' end
+
+    local botCoords = GetEntityCoords(botPed)
+    local dist = #(GetEntityCoords(commanderPed) - botCoords)
+
+    if dist <= (Config.CommsLink.PhysicalCommandRadius or 8.0) then
+        return true
+    end
+
+    if not HasActiveBurnerPhone(commanderSrc) then
+        return false, 'no_burner_phone'
+    end
+
+    if IsCoordsInDeadZone(botCoords) then
+        return false, 'static_blocked'
+    end
+
+    return true
+end
+
+
+-- =====================================================================
+-- ★ [MODUL 13/11] TAKTIK MOD ATAMASI -- SERVER TARAFI ONAYI
+-- client/mercenary_followers.lua ARTIK modu DOGRUDAN UYGULAMAZ; ilgili
+-- botlar icin panik (Matrix.Wounds.IsBotPanicking) VE muhabere hatti
+-- (Matrix.Mercenary.CanReachBot) BURADA dogrulanir, yalnizca ONAYLANAN
+-- botlarin netId'leri client'a geri bildirilir. Panik REDDI bir telsiz
+-- bulteni olarak da geri bildirilir.
+-- =====================================================================
+RegisterNetEvent('matrix:server:mercenary:assignTaskMode', function(mode)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if not VALID_TASK_MODES_SERVER[mode] then return end
+
+    local botIds = Matrix.Mercenary.GetDeployedBotIds(src)
+    local approvedNetIds, rejections = {}, {}
+
+    for _, botId in ipairs(botIds) do
+        local bot = Matrix.Bots[botId]
+        if bot then
+            local reachOk, reachReason = Matrix.Mercenary.CanReachBot(src, botId)
+            if not reachOk then
+                rejections[#rejections + 1] = { botId = botId, reason = reachReason }
+            elseif Matrix.Wounds and Matrix.Wounds.IsBotPanicking and Matrix.Wounds.IsBotPanicking(botId) then
+                rejections[#rejections + 1] = { botId = botId, reason = 'panicking' }
+            else
+                local netId = bot.state and bot.state.net_id
+                if type(netId) == 'number' and netId > 0 then
+                    approvedNetIds[#approvedNetIds + 1] = netId
+                end
+            end
+        end
+    end
+
+    TriggerClientEvent('matrix:client:mercenary:taskModeApproved', src, mode, approvedNetIds, rejections)
+end)
+
+
+-- =====================================================================
+-- ★ [MODUL 13.4] HQ BARON UZAKTAN YONETIM
+-- Rutbeli subay (Config.Hierarchy.MinRankLevelForCommand -- MEVCUT
+-- Matrix.Hierarchy.HasCommandAuthority ile AYNI yetki, ikinci bir
+-- "komuta yetkisi" ICAT EDILMEZ), fiziksel olarak yaninda durmadan,
+-- herhangi bir oyuncuya atanmis (deployed) bota F10/G/H panelinden
+-- UZAKTAN emir (hold/guard/attack/follow) gonderebilir -- AYNI muhabere
+-- hatti kurallari (Matrix.Mercenary.CanReachBot) ve panik kontrolu
+-- gecerlidir. Onay, botun SAHIBI OLAN oyuncunun client'ina iletilir --
+-- yalnizca o client Followers[] uzerinde native gorev atayabilir.
+-- =====================================================================
+RegisterNetEvent('matrix:server:mercenary:remoteCommand', function(targetBotId, mode)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if not VALID_TASK_MODES_SERVER[mode] then return end
+
+    local pstate = Matrix.GetOrCreatePlayerState and Matrix.GetOrCreatePlayerState(src)
+    local citizenid = pstate and pstate.citizenid
+    if not citizenid or not (Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority
+        and Matrix.Hierarchy.HasCommandAuthority(citizenid)) then
+        TriggerClientEvent('matrix:client:actionNotify', src, false, 'Bu komutu vermek icin yeterli rutbeniz yok.')
+        return
+    end
+
+    targetBotId = tonumber(targetBotId)
+    local bot = targetBotId and Matrix.Bots[targetBotId]
+    if not bot then
+        TriggerClientEvent('matrix:client:actionNotify', src, false, 'Bot bulunamadi.')
+        return
+    end
+
+    local reachOk, reachReason = Matrix.Mercenary.CanReachBot(src, targetBotId)
+    if not reachOk then
+        local msg = (reachReason == 'no_burner_phone') and '[BZZZT] -- bag-lan-ti kes-ildi... Acik Hat yok.'
+            or (reachReason == 'static_blocked') and '[BZZZT] -- bag-lan-ti kes-ildi... siber parazit/kor bolge.'
+            or 'Komut hedefe ulasamadi.'
+        TriggerClientEvent('matrix:client:actionNotify', src, false, msg)
+        return
+    end
+
+    if Matrix.Wounds and Matrix.Wounds.IsBotPanicking and Matrix.Wounds.IsBotPanicking(targetBotId) then
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            '[BZZZT] -- Komutanim ates hatti cok yogun, kafami kaldiramiyorum, pozisyonu terk edemem!')
+        return
+    end
+
+    local ownerSrc = bot.state and bot.state.assigned_src
+    local netId    = bot.state and bot.state.net_id
+    if ownerSrc and type(netId) == 'number' and netId > 0 then
+        TriggerClientEvent('matrix:client:mercenary:taskModeApproved', ownerSrc, mode, { netId }, {})
+    end
+end)
+
+
 exports('RequestSummon',  function(src)               return Matrix.Mercenary.RequestSummon(src) end)
 exports('ReportDismiss',  function(src, remaining)    return Matrix.Mercenary.ReportDismiss(src, remaining) end)
 exports('GetFollowerCount', function(src)             return Matrix.Mercenary.GetFollowerCount(src) end)
 exports('GetFollowerNetIds', function(src)            return Matrix.Mercenary.GetFollowerNetIds(src) end)
 exports('GetDeployedBotIds', function(src)            return Matrix.Mercenary.GetDeployedBotIds(src) end)
+exports('CanReachBot',    function(src, botId)        return Matrix.Mercenary.CanReachBot(src, botId) end)

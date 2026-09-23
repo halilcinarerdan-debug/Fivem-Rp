@@ -51,6 +51,11 @@ if not Config.Mercenary or not Config.Mercenary.EnablePhysicalFollowers then ret
 
 local Followers = {} -- [i] = { ped = handle, botId = number, entering = bool, state = {...} }
 
+-- ★ Ileri bildirim (forward declaration): 'attack' modu onayi (asagida,
+-- DefendPlayerIfThreatened tanimindan ONCE gelen bir event handler icinde)
+-- AYNI tehdit taramasini kullanir -- ikinci bir tarama ICAT EDILMEZ.
+local DefendPlayerIfThreatened
+
 -- ★ [MODUL 10] su an bilinen dusman hitsquad ped'leri (server/hitsquad.lua
 -- 'matrix:client:hitsquad:squadSpotted' ile bildirir) -- [driverNetId] = true.
 -- Bu, generic IsPedInCombat taramasindan BAGIMSIZ, DETERMINISTIK bir
@@ -193,69 +198,163 @@ end, false)
 
 
 -- =====================================================================
--- ★ [MODUL 11] TAKTİK MOD ATAMASI (F10 -> "Muhafiz Taktik Modu"):
+-- ★ [MODUL 11/13] TAKTİK MOD ATAMASI (F10 -> "Muhafiz Taktik Modu"):
 -- hold / guard / observe -- takipciyi ATANDIGI ANDAKI konumuna (ankraj)
 -- ve oyuncunun O ANDAKI baktigi yone KİLİTLER; follow -- normal takip
--- davranisina DÖNER (ankraj temizlenir). Gecerli modlar disinda bir
--- girdi SESSİZCE REDDEDİLİR (invalid mode injection guard).
+-- davranisina DÖNER (ankraj temizlenir); attack -- ANINDA bir tehdit
+-- taramasi zorlar (asagida DefendPlayerIfThreatened ile AYNI tarama).
+-- Gecerli modlar disinda bir girdi SESSİZCE REDDEDİLİR (invalid mode
+-- injection guard).
+--
+-- ★ [MODUL 13] Bu emir ARTIK CLIENT TARAFINDA DOGRUDAN UYGULANMAZ --
+-- server/mercenary_followers.lua'ya gonderilir; server her bot icin
+-- panik (cortisol_level >= RefusalCortisolThreshold) VE muhabere hatti
+-- (Config.CommsLink.PhysicalCommandRadius / Acik Hat+Dead Zone) kontrolu
+-- yapar, yalnizca ONAYLANAN botlarin netId'leri 'matrix:client:mercenary:
+-- taskModeApproved' ile GERI DONER -- reddedilen botlar icin sebep
+-- (panik ise telsiz bulteni) bildirilir.
 -- =====================================================================
-local VALID_TASK_MODES = { hold = true, guard = true, observe = true, follow = true }
+local VALID_TASK_MODES = { hold = true, guard = true, observe = true, follow = true, attack = true }
 
 local TASK_MODE_LABELS = {
     hold    = 'Nöbet Tut (Hold)',
     guard   = 'Koru (Guard)',
     observe = 'Gözlemle (Observe)',
-    follow  = 'Takip Et (Follow)'
+    follow  = 'Takip Et (Follow)',
+    attack  = 'Saldır (Attack)'
 }
 
-local function AssignTaskModeToFollowers(mode)
-    if not VALID_TASK_MODES[mode] then return end
+local REJECTION_LABELS = {
+    panicking       = '[BZZZT] -- Komutanım ateş hattı çok yoğun, kafamı kaldıramıyorum, pozisyonu terk edemem!',
+    no_burner_phone = '[BZZZT] -- bağ-lan-tı kes-ildi... Açık Hat (burner_phone) yok.',
+    static_blocked  = '[BZZZT] -- bağ-lan-tı kes-ildi... siber parazit/kör bölge.',
+    bot_unreachable = '[BZZZT] -- ...sinyal-yok...',
+    commander_unresolved = '[BZZZT] -- ...sinyal-yok...'
+}
+
+RegisterCommand('muhafiztaktik', function(_, args)
+    local mode = args and args[1] and tostring(args[1]):lower() or nil
+    if not mode or not VALID_TASK_MODES[mode] then
+        if lib and lib.notify then
+            lib.notify({ title = '[MUHAFIZ TAKTIK]', description = 'Gecerli mod: hold, guard, observe, follow, attack', type = 'error' })
+        end
+        return
+    end
     if #Followers == 0 then
         if lib and lib.notify then
             lib.notify({ title = '[MUHAFIZ TAKTIK]', description = 'Aktif takipci yok.', type = 'error' })
         end
         return
     end
+    TriggerServerEvent('matrix:server:mercenary:assignTaskMode', mode)
+end, false)
+RegisterKeyMapping('muhafiztaktik', 'Muhafiz Taktik Modu Ata: hold/guard/observe/follow/attack (F10 icinden de erisilebilir)', 'keyboard', '')
+
+
+--- ★ [MODUL 13] Server'in ONAYLADIGI netId listesine gore MODU UYGULAR
+--- (idempotent ankraj/heading mantigi MODUL 11 ile AYNI); reddedilenler
+--- icin telsiz bulteni basar.
+RegisterNetEvent('matrix:client:mercenary:taskModeApproved', function(mode, approvedNetIds, rejections)
+    if not VALID_TASK_MODES[mode] then return end
 
     local playerPed     = PlayerPedId()
     local playerHeading = GetEntityHeading(playerPed)
     local isAnchorMode  = (mode == 'hold' or mode == 'guard' or mode == 'observe')
 
+    local approvedSet = {}
+    for _, netId in ipairs(approvedNetIds or {}) do approvedSet[netId] = true end
+
+    local appliedAny = false
     for _, entry in ipairs(Followers) do
         if entry.ped and DoesEntityExist(entry.ped) then
-            entry.state = entry.state or {}
-            entry.state.current_task_mode = mode
-            entry.state.anchored          = false
+            local netId = NetworkGetNetworkIdFromEntity(entry.ped)
+            if netId and approvedSet[netId] then
+                appliedAny = true
+                entry.state = entry.state or {}
+                entry.state.current_task_mode = (mode == 'attack') and 'follow' or mode
+                entry.state.anchored          = false
 
-            if isAnchorMode then
-                -- ★ Ankraj = emrin verildigi ANDAKI ped konumu; heading =
-                -- emrin verildigi ANDAKI oyuncunun baktigi yon.
-                entry.state.last_assigned_coords  = GetEntityCoords(entry.ped)
-                entry.state.last_assigned_heading = playerHeading
-            else
-                entry.state.last_assigned_coords  = nil
-                entry.state.last_assigned_heading = nil
+                if isAnchorMode then
+                    -- ★ Ankraj = emrin verildigi ANDAKI ped konumu; heading =
+                    -- emrin verildigi ANDAKI oyuncunun baktigi yon.
+                    entry.state.last_assigned_coords  = GetEntityCoords(entry.ped)
+                    entry.state.last_assigned_heading = playerHeading
+                else
+                    entry.state.last_assigned_coords  = nil
+                    entry.state.last_assigned_heading = nil
+                end
+
+                -- ★ [MODUL 13] 'attack' -- ANINDA bir tehdit taramasi
+                -- zorlar (asagida tanimli DefendPlayerIfThreatened ile
+                -- AYNI fonksiyon, ikinci bir tarama ICAT EDILMEZ); sonra
+                -- normal takip/catisma mantigina ('follow') doner.
+                if mode == 'attack' then
+                    DefendPlayerIfThreatened(playerPed)
+                end
             end
         end
     end
 
-    if lib and lib.notify then
+    if appliedAny and lib and lib.notify then
         lib.notify({ title = '[MUHAFIZ TAKTIK]', description = ('Mod: %s'):format(TASK_MODE_LABELS[mode] or mode), type = 'inform' })
     end
+
+    for _, rej in ipairs(rejections or {}) do
+        local msg = REJECTION_LABELS[rej.reason] or ('Komut reddedildi: %s'):format(tostring(rej.reason))
+        if lib and lib.notify then
+            lib.notify({ title = '[TELSIZ]', description = msg, type = 'error' })
+        end
+    end
+end)
+
+
+-- =====================================================================
+-- ★ [MODUL 13.3] TAKTIK TURNIKE PROTOKOLU: en yakin agir yarali/koma
+-- modundaki takipciye [Y] ile turnike uygular (lib.progressCircle ile
+-- Config.TacticalTourniquet.ApplyDurationMs animasyonu) -- gercek
+-- dogrulama/etki (envanter dusumu, yara sonumlemesi, koma-erteleme,
+-- adli kan izi) SERVER TARAFINDA (server/wound_system.lua Matrix.Wounds.
+-- ApplyTourniquet) yapilir, client SADECE animasyonu oynatir.
+-- =====================================================================
+local function FindNearestFollowerBotId(maxDist)
+    local playerPed = PlayerPedId()
+    local playerCoords = GetEntityCoords(playerPed)
+    local bestBotId, bestDist = nil, maxDist or (Config.TacticalTourniquet and Config.TacticalTourniquet.ApplyRadiusMeters or 2.0)
+
+    for _, entry in ipairs(Followers) do
+        if entry.ped and DoesEntityExist(entry.ped) and entry.botId then
+            local d = #(GetEntityCoords(entry.ped) - playerCoords)
+            if d <= bestDist then
+                bestBotId, bestDist = entry.botId, d
+            end
+        end
+    end
+    return bestBotId
 end
 
-
-RegisterCommand('muhafiztaktik', function(_, args)
-    local mode = args and args[1] and tostring(args[1]):lower() or nil
-    if not mode or not VALID_TASK_MODES[mode] then
+RegisterCommand('turnikeuygula', function()
+    local botId = FindNearestFollowerBotId()
+    if not botId then
         if lib and lib.notify then
-            lib.notify({ title = '[MUHAFIZ TAKTIK]', description = 'Gecerli mod: hold, guard, observe, follow', type = 'error' })
+            lib.notify({ title = '[TURNIKE]', description = 'Yakinda turnike uygulanabilecek bir takipci yok.', type = 'error' })
         end
         return
     end
-    AssignTaskModeToFollowers(mode)
+
+    if lib and lib.progressCircle then
+        local completed = lib.progressCircle({
+            duration = Config.TacticalTourniquet and Config.TacticalTourniquet.ApplyDurationMs or 6000,
+            label = 'Taktik Turnike Uygulaniyor...',
+            useWhileDead = false,
+            canCancel = true,
+            disable = { move = true, combat = true }
+        })
+        if not completed then return end
+    end
+
+    TriggerServerEvent('matrix:server:wounds:applyTourniquet', botId)
 end, false)
-RegisterKeyMapping('muhafiztaktik', 'Muhafiz Taktik Modu Ata: hold/guard/observe/follow (F10 icinden de erisilebilir)', 'keyboard', '')
+RegisterKeyMapping('turnikeuygula', 'Yakindaki Yarali Takipciye Taktik Turnike Uygula ([Y] - F10 icinden de erisilebilir)', 'keyboard', 'Y')
 
 
 -- =====================================================================
@@ -289,7 +388,7 @@ end
 -- içinde silahlı düşman ped'i) tespit edilirse TaskCombatPed ile oyuncuyu
 -- savunurlar.
 -- =====================================================================
-local function DefendPlayerIfThreatened(playerPed)
+function DefendPlayerIfThreatened(playerPed)
     local playerCoords = GetEntityCoords(playerPed)
     local handle, ped = FindFirstPed()
     local found = true
