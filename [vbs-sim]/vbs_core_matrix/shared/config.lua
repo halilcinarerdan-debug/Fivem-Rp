@@ -26,7 +26,13 @@ Config.Forensics = {
     MatchCertaintyThreshold        = 0.75,
     FingerprintQualityCortisolWeight = 0.4,
     CasingWearWeight               = 0.3,
-    CasingCortisolWeight           = 0.2
+    CasingCortisolWeight           = 0.2,
+
+    -- MODUL 8: yari-otomatik silahlar icin tetik-agirligi/anti-makro
+    -- oran siniri -- bu araligin altinda gelen atislar (makro/rapid-fire)
+    -- silahi 'jammed' olarak isaretler (bkz. server/forensics.lua
+    -- Matrix.Forensics.OnWeaponShotFired / TriggerWeight guard).
+    TriggerWeightMs                 = 250
 }
 
 
@@ -368,6 +374,55 @@ Config.Forensics.WeaponJamBaseChance                    = 0.65
 Config.Forensics.WeaponJamHardDeleteRisk                = 0.90
 
 
+-- =====================================================================
+-- MODUL 2: ADLİ KAN DELİLİ (BIOLOGICAL_BLOOD)
+-- Bıçak/mêlée hasar raporu (server/wound_system.lua reportPlayerWounded)
+-- bu listede olan bir silahla geldiğinde server/forensics.lua Matrix.
+-- Forensics.RecordBloodEvidence tetiklenir. blood_pool_purity RNG YOK --
+-- kurbanın ANLIK cortisol_level/fatigue_level (wound_system.lua ile AYNI
+-- biyoloji alanları) üzerinden deterministik hesaplanır.
+-- =====================================================================
+Config.Forensics.MeleeWeaponNames = {
+    'WEAPON_KNIFE', 'WEAPON_SWITCHBLADE', 'WEAPON_DAGGER', 'WEAPON_BATTLEAXE',
+    'WEAPON_MACHETE', 'WEAPON_HATCHET', 'WEAPON_BAT', 'WEAPON_KNUCKLE',
+    'WEAPON_NIGHTSTICK', 'WEAPON_UNARMED'
+}
+
+-- =====================================================================
+-- MODUL 4: PAMPA/SAWNOFF (SHOTGUN) BALİSTİĞİ
+-- Saçma (pellet) silahlarında klasik yiv-set (striation) eşleştirmesi
+-- ANLAMSIZDIR (tek bir sabit namludan çok sayıda serbest parça çıkar) --
+-- bu yüzden striation_quality SABİT 0.0'a kilitlenir ve bunun yerine
+-- pellet-kütle vekili (inflicted_force_striation) üzerinden eşleştirme
+-- yapılır. RNG YOK: pellet sayısıyla DOĞRUSAL ölçeklenir.
+-- =====================================================================
+Config.Forensics.ShotgunWeaponItems = {
+    weapon_pumpshotgun  = true,
+    weapon_sawnoffshotgun = true
+}
+Config.Forensics.ShotgunPelletCount               = 8
+Config.Forensics.ShotgunForcePerPellet            = 0.09 -- inflicted_force_striation = PelletCount * ForcePerPellet (durability ile olceklenir)
+
+
+Config.Forensics.BloodEvidence = {
+    Item                   = 'blood_evidence_sample',
+    ItemLabel              = 'Kan Örneği (Adli)',
+    CollectionRadiusMeters = 2.5,
+
+    -- purity = clamp(1 - (cortisol*CortisolWeight + fatigue*FatigueWeight), 0, 1)
+    CortisolWeight         = 0.6,
+    FatigueWeight          = 0.4,
+
+    -- Lineer erime: her DecayIntervalMs'de purity -= DecayAmountPerInterval
+    -- (asimptotik/exp DEĞİL -- görev talimatı açıkça "lineer" istiyor).
+    DecayIntervalMs        = 30 * 60 * 1000, -- 30 dakika
+    DecayAmountPerInterval = 0.15,
+
+    -- Bu yaşın (gerçek zaman) üzerindeki kan delili satırları otonom silinir.
+    MaxAgeSeconds          = 2 * 60 * 60 -- 2 saat
+}
+
+
 Config.RadioSilence = {
     MaxDurationMinutes = 30
 }
@@ -513,10 +568,31 @@ Config.BlackMarket = {
     },
 
 
-    -- Karaborsa silah kataloğu: ox_inventory item adı + başlangıç metadata.
+    -- ★ MODUL 3: GERÇEKÇİLİK GEÇİŞİ — RPG/ağır patlayıcı/minigun/bombaatar
+    -- gibi gerçekçi-olmayan silah sınıfları TAMAMEN KALDIRILDI. Katalog artık
+    -- yalnızca 4 GERÇEKÇI sınıf sunar: Pistol / SMG / Rifle / Shotgun.
+    -- `class` alanı hem /namludegistir whitelist'i hem de bot muharebe AI'ı
+    -- (server/mercenary_followers.lua, server/hitsquad.lua) tarafından
+    -- okunur -- rifle taşıyan botlar mesafeden siper alır, shotgun taşıyan
+    -- botlar yakın mesafeye iter (bkz. Config.CombatByWeaponClass, aşağıda).
     Weapons = {
-        { id = 'bm_pistol', label = 'Tabanca (Seri No Silinmiş)', item = 'weapon_combatpistol', price = 3800.0,  durability = 55.0 },
-        { id = 'bm_ak47',   label = 'AK-47 (Seri No Silinmiş)',   item = 'weapon_assaultrifle', price = 15500.0, durability = 45.0 }
+        { id = 'bm_pistol',   label = 'Tabanca (Seri No Silinmiş)',      item = 'weapon_combatpistol', class = 'pistol',  price = 3800.0,  durability = 55.0 },
+        { id = 'bm_smg',      label = 'Mikro SMG (Seri No Silinmiş)',    item = 'weapon_microsmg',     class = 'smg',     price = 9800.0,  durability = 50.0 },
+        { id = 'bm_ak47',     label = 'Tüfek (Seri No Silinmiş)',        item = 'weapon_assaultrifle', class = 'rifle',   price = 15500.0, durability = 45.0 },
+        { id = 'bm_shotgun',  label = 'Pompalı Tüfek (Seri No Silinmiş)',item = 'weapon_pumpshotgun',  class = 'shotgun', price = 12000.0, durability = 48.0 }
+    },
+
+
+    -- ★ MODUL 3: silah SINIFI -> muharebe AI davranışı. Rifle'lar mesafeden
+    -- siper alıp angaje olur; shotgun'lar yakın mesafeye iter. Diğer
+    -- sınıflar (pistol/smg) mevcut varsayılan (dengeli) davranışı korur.
+    -- server/hitsquad.lua ve server/mercenary_followers.lua BU tabloyu
+    -- SetPedCombatAttributes/SetPedCombatRange cagrilarindan once okur.
+    CombatByWeaponClass = {
+        pistol  = { combat_range = 1, use_cover = false, seek_cover_ratio = 0 },  -- CR_NEAR
+        smg     = { combat_range = 1, use_cover = false, seek_cover_ratio = 0 },  -- CR_NEAR
+        rifle   = { combat_range = 2, use_cover = true,  seek_cover_ratio = 100 }, -- CR_FAR + BF_CanUseCover
+        shotgun = { combat_range = 0, use_cover = false, seek_cover_ratio = 0 }   -- CR_NEAR (agresif yakinlasma)
     },
 
 
@@ -524,8 +600,10 @@ Config.BlackMarket = {
     -- akışından geçer (bkz. server/rendezvous.lua). `item`/`count` çifti
     -- ox_inventory'ye handoff anında AddItem ile eklenir.
     Ammo = {
-        { id = 'bm_ammo_pistol', label = 'Tabanca Mühimmatı (x60, Elden)', item = 'ammo_pistol', count = 60, price = 900.0  },
-        { id = 'bm_ammo_rifle',  label = 'Tüfek Mühimmatı (x90, Elden)',   item = 'ammo_rifle',   count = 90, price = 2100.0 }
+        { id = 'bm_ammo_pistol',  label = 'Tabanca Mühimmatı (x60, Elden)',    item = 'ammo_pistol',  class = 'pistol',  count = 60, price = 900.0  },
+        { id = 'bm_ammo_smg',     label = 'SMG Mühimmatı (x90, Elden)',        item = 'ammo_smg',     class = 'smg',     count = 90, price = 1400.0 },
+        { id = 'bm_ammo_rifle',   label = 'Tüfek Mühimmatı (x90, Elden)',      item = 'ammo_rifle',   class = 'rifle',   count = 90, price = 2100.0 },
+        { id = 'bm_ammo_shotgun', label = 'Pompalı Mühimmatı (x24, Elden)',    item = 'ammo_shotgun', class = 'shotgun', count = 24, price = 1600.0 }
     },
 
 
@@ -545,7 +623,53 @@ Config.BlackMarket = {
     -- /namludegistir yalnızca bu whitelist'teki silah item'ları için çalışır.
     ReplaceableWeaponItems = {
         weapon_combatpistol = true,
-        weapon_assaultrifle = true
+        weapon_microsmg     = true,
+        weapon_assaultrifle = true,
+        weapon_pumpshotgun  = true
+    },
+
+
+    -- ★ MODUL 4: DETERMİNİSTİK KARABORSA STOK PENCERESİ -- RNG YOK. Saatlik
+    -- (UTC, os.time() bucket) + citizenid'in toptancı güveninin (matrix_
+    -- supplier_trust.trust, bkz. server/logistics.lua Matrix.Supplier.
+    -- GetTrust) sağlama toplamı + silah SINIFININ sağlama toplamı bir 0-23
+    -- kovaya (bucket) katlanır. Bucket bu pencerenin ALTINDAYSA o sınıf O
+    -- SAAT stokta YOKTUR (server/blackmarket.lua IsWeaponClassAvailableNow).
+    AvailabilityClosedWindowHours = 6,
+    AvailabilitySupplierId        = 'blackmarket_weapons',
+
+
+    -- ★ MODUL 3: karaborsa silah/mühimmat teslimatı VE bot mühimmat ikmali
+    -- (server/logistics.lua Matrix.Logistics.DispatchAmmoRun) artık qbx_core
+    -- 'weapon' ruhsatı ZORUNLU kılar -- ruhsatsız/geçersiz citizenid teslimat
+    -- REDDEDİLİR (rütbe/izin-yok mesajıyla).
+    WeaponLicenseType = 'weapon',
+
+
+    -- ★ MODUL 9: SİLAH MODİFİKASYONU — ox_inventory metadata ile eklenen
+    -- iki takılabilir parça. glock_switch SADECE `class == 'pistol'` uyumlu
+    -- item'lara, mimtac_drop_in_trigger SADECE `class == 'rifle'` uyumlu
+    -- item'lara takılır (bkz. server/blackmarket.lua Matrix.BlackMarket.
+    -- AttachWeaponMod). Global Config sabitleri MUTASYONA UĞRATILMAZ (bu,
+    -- silahlar-arasi capraz-kirlenme/ekonomi hatasi olurdu) -- her ikisi de
+    -- SADECE takili oldugu silahin metadata'sinda tutulan bir CARPAN/DELTA
+    -- olarak uygulanir (server/forensics.lua ComputeMechanicalJamProbability
+    -- ve OnWeaponShotFired bu metadata alanlarini okur).
+    WeaponMods = {
+        glock_switch = {
+            label                    = 'Glock Switch (Tam-Otomatik Dönüştürücü)',
+            compatible_class         = 'pistol',
+            price                    = 6500.0,
+            full_auto                = true,
+            jam_coefficient_multiplier = 3.0
+        },
+        mimtac_drop_in_trigger = {
+            label                          = 'MIMTAC Drop-In Tetik Grubu',
+            compatible_class                = 'rifle',
+            price                           = 4200.0,
+            trigger_weight_multiplier       = 0.60, -- TriggerWeightMs %40 azalir
+            jam_threshold_percent_delta     = -15.0 -- MechanicalJamThresholdPercent 15 puan duser
+        }
     }
 }
 

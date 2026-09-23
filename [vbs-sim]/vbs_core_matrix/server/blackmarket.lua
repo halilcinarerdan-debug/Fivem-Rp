@@ -183,6 +183,50 @@ end
 
 
 -- =====================================================================
+-- ★ MODUL 3: qbx_core SİLAH RUHSATI KAPISI
+-- Mevcut Matrix.QBX (exports.qbx_core) çağrı deseni (bkz. bureau.lua/
+-- main.lua Matrix.QBX:GetPlayer(src)) izlenir. qbx_core, ruhsatları
+-- PlayerData.metadata.licences[type] boolean olarak tutar -- bu, bu
+-- kod tabanındaki GetPlayer/PlayerData erişim biçimiyle AYNI sözleşmedir.
+-- =====================================================================
+function Matrix.BlackMarket.HasWeaponLicense(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+    local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
+    if not ok or not player or not player.PlayerData then return false end
+
+    local licences = player.PlayerData.metadata and player.PlayerData.metadata.licences
+    local licenseType = Config.BlackMarket.WeaponLicenseType or 'weapon'
+    return type(licences) == 'table' and licences[licenseType] == true
+end
+
+
+-- =====================================================================
+-- ★ MODUL 4: DETERMİNİSTİK KARABORSA STOK PENCERESİ (RNG YOK)
+-- bucket = (saat-UTC + trust_checksum + sinif_checksum) % 24
+-- bucket < AvailabilityClosedWindowHours ise o silah SINIFI o saat
+-- STOKTA YOKTUR. Aynı (saat, trust, sınıf) girdisi HER ZAMAN aynı
+-- sonucu üretir -- iki oyuncu aynı anda aynı sınıfı sorgularsa aynı
+-- cevabı alır (deterministik, tekrar edilebilir).
+-- =====================================================================
+function Matrix.BlackMarket.IsWeaponClassAvailableNow(citizenid, weaponClass)
+    weaponClass = weaponClass or 'pistol'
+    local hourUtc = tonumber(os.date('!%H', os.time())) or 0
+
+    local trust = 0.5
+    if Matrix.Supplier and Matrix.Supplier.GetTrust then
+        local ok, t = pcall(Matrix.Supplier.GetTrust, citizenid, Config.BlackMarket.AvailabilitySupplierId)
+        if ok and type(t) == 'number' then trust = t end
+    end
+
+    local trustBucket = ChecksumOf(('%.4f'):format(trust), 7) % 24
+    local classBucket = ChecksumOf(weaponClass, 13) % 24
+    local combinedBucket = (hourUtc + trustBucket + classBucket) % 24
+
+    return combinedBucket >= (Config.BlackMarket.AvailabilityClosedWindowHours or 0), combinedBucket
+end
+
+
+-- =====================================================================
 -- ★ [SEC-1] SRC BAZLI MUTEX (RACE CONDITION / DUPE KORUMASI)
 -- Aynı src için üst üste bindirilmiş satın alma tetiklemeleri (50 event'in
 -- aynı milisaniyede tetiklenmesi dahil) ikinci pencere açılmadan reddedilir.
@@ -485,6 +529,24 @@ RegisterNetEvent('matrix:server:blackmarket:buyWeapon', function(catalogId, toke
         if not citizenid then Reply(src, 'Profil cozulemedi.'); return end
 
 
+        -- ★ MODUL 3: qbx_core 'weapon' ruhsati zorunlu.
+        if not Matrix.BlackMarket.HasWeaponLicense(src) then
+            Reply(src, 'Silah ruhsatiniz yok/gecersiz -- bu satin alma icin yetkiniz yok.')
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, entry.label, nil)
+            return
+        end
+
+
+        -- ★ MODUL 4: deterministik stok penceresi -- o saat/sinif icin
+        -- karaborsa kapali olabilir (RNG YOK, bkz. IsWeaponClassAvailableNow).
+        local available = Matrix.BlackMarket.IsWeaponClassAvailableNow(citizenid, entry.class)
+        if not available then
+            Reply(src, ('%s sinifi su anda stokta degil (toptanci penceresi kapali). Daha sonra tekrar deneyin.'):format(entry.class or 'silah'))
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, entry.label, nil)
+            return
+        end
+
+
         local chargeOk, reason = ChargeCash(src, entry.price)
         if not chargeOk then
             Reply(src, reason == 'insufficient_funds' and 'Yetersiz nakit.' or 'Odeme basarisiz.')
@@ -555,6 +617,24 @@ RegisterNetEvent('matrix:server:blackmarket:buyAmmo', function(catalogId, token)
         local state = Matrix.GetOrCreatePlayerState(src)
         local citizenid = state and state.citizenid
         if not citizenid then Reply(src, 'Profil cozulemedi.'); return end
+
+
+        -- ★ MODUL 3: mühimmat da silahla AYNI ruhsat sözleşmesine tabidir.
+        if not Matrix.BlackMarket.HasWeaponLicense(src) then
+            Reply(src, 'Silah ruhsatiniz yok/gecersiz -- muhimmat satin alamazsiniz.')
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, entry.label, nil)
+            return
+        end
+
+
+        -- ★ MODUL 4: deterministik stok penceresi (mühimmat da silah
+        -- sinifiyla AYNI toptanci akisina baglidir).
+        local available = Matrix.BlackMarket.IsWeaponClassAvailableNow(citizenid, entry.class)
+        if not available then
+            Reply(src, ('%s muhimmati su anda stokta degil (toptanci penceresi kapali).'):format(entry.class or 'silah'))
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, entry.label, nil)
+            return
+        end
 
 
         local chargeOk, reason = ChargeCash(src, entry.price)
@@ -712,6 +792,134 @@ RegisterNetEvent('matrix:server:blackmarket:buyBurnerPhone', function(catalogId,
         Matrix.Log('BLACKMARKET', '[HATA] buyBurnerPhone ic hata (kilit serbest birakildi): %s', tostring(err))
     end
 end)
+
+
+-- =====================================================================
+-- ★ MODUL 9: SİLAH MODİFİKASYONU SATIN ALMA + TAKMA
+-- glock_switch (yalnizca 'pistol' sinifi) ve mimtac_drop_in_trigger
+-- (yalnizca 'rifle' sinifi) -- Config.BlackMarket.WeaponMods'ta tanimli.
+-- Satin alma: SpareBarrel ile AYNI (anlik teslim) desen. Takma: hedef
+-- silahin item adi Config.BlackMarket.Weapons katalogundan `class`
+-- cozulup WeaponMods[modName].compatible_class ile karsilastirilir --
+-- UYUMSUZSA REDDEDILIR.
+-- =====================================================================
+local function FindWeaponClassByItem(itemName)
+    for _, w in ipairs(Config.BlackMarket.Weapons) do
+        if w.item == itemName then return w.class end
+    end
+    return nil
+end
+Matrix.BlackMarket.FindWeaponClassByItem = FindWeaponClassByItem
+
+
+RegisterNetEvent('matrix:server:blackmarket:buyWeaponMod', function(modName, token)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    if not ConsumeHandshakeToken(src, 'weapon_mod', modName, token) then
+        Matrix.Log('BLACKMARKET', '[SEC-4][GUVENLIK] src=%d gecersiz/eksik handshake token ile buyWeaponMod cagirdi (spoofing supheli).', src)
+        return
+    end
+    if not TryAcquirePurchaseLock(src) then
+        Reply(src, 'Bir onceki karaborsa islemin hala isleniyor, bekle.')
+        return
+    end
+
+
+    local ok, err = pcall(function()
+        local modDef = Config.BlackMarket.WeaponMods and Config.BlackMarket.WeaponMods[modName]
+        if not modDef then Reply(src, 'Gecersiz silah modifikasyonu.'); return end
+
+        local state = Matrix.GetOrCreatePlayerState(src)
+        local citizenid = state and state.citizenid
+        if not citizenid then Reply(src, 'Profil cozulemedi.'); return end
+
+        if not Matrix.BlackMarket.HasWeaponLicense(src) then
+            Reply(src, 'Silah ruhsatiniz yok/gecersiz -- modifikasyon satin alamazsiniz.')
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, modDef.label, nil)
+            return
+        end
+
+        local chargeOk, reason = ChargeCash(src, modDef.price)
+        if not chargeOk then
+            Reply(src, reason == 'insufficient_funds' and 'Yetersiz nakit.' or 'Odeme basarisiz.')
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, modDef.label, nil)
+            return
+        end
+
+        local addOk = pcall(function()
+            return exports['ox_inventory']:AddItem(src, modName, 1)
+        end)
+        if not addOk then
+            RefundCash(src, modDef.price, citizenid)
+            Reply(src, 'Modifikasyon teslim edilemedi, odeme iade edildi (envanter dolu olabilir).')
+            TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, false, modDef.label, nil)
+            return
+        end
+
+        LogPurchase(citizenid, 'weapon_mod', modName, modDef.price)
+        Reply(src, ('%s satin alindi. /silahmodtak ile uyumlu silahiniza takabilirsiniz.'):format(modDef.label))
+        TriggerClientEvent('matrix:client:blackmarket:purchaseResult', src, true, modDef.label, modName)
+        Matrix.Log('BLACKMARKET', '[SATIS] %s -> mod %s $%.0f', citizenid, modName, modDef.price)
+    end)
+    ReleasePurchaseLock(src)
+    if not ok then
+        Matrix.Log('BLACKMARKET', '[HATA] buyWeaponMod ic hata (kilit serbest birakildi): %s', tostring(err))
+    end
+end)
+
+
+RegisterCommand('silahmodtak', function(src, args)
+    local modSlot    = tonumber(args[1])
+    local weaponSlot = tonumber(args[2])
+    if type(src) ~= 'number' or src <= 0 or not modSlot or not weaponSlot then
+        Reply(src, 'Kullanim: /silahmodtak [modSlotu] [silahSlotu]')
+        return
+    end
+
+    local inventoryId = tostring(src)
+
+    local modOk, modItem = pcall(function() return exports['ox_inventory']:GetSlot(inventoryId, modSlot) end)
+    if not modOk or type(modItem) ~= 'table' or type(modItem.name) ~= 'string' then
+        Reply(src, 'Belirtilen slotta bir modifikasyon bulunamadi.'); return
+    end
+
+    local modDef = Config.BlackMarket.WeaponMods and Config.BlackMarket.WeaponMods[modItem.name]
+    if not modDef then
+        Reply(src, 'Bu esya bir silah modifikasyonu degil.'); return
+    end
+
+    local weaponOk, weaponItem = pcall(function() return exports['ox_inventory']:GetSlot(inventoryId, weaponSlot) end)
+    if not weaponOk or type(weaponItem) ~= 'table' or type(weaponItem.name) ~= 'string' then
+        Reply(src, 'Belirtilen slotta silah bulunamadi.'); return
+    end
+
+    local weaponClass = FindWeaponClassByItem(weaponItem.name)
+    if weaponClass ~= modDef.compatible_class then
+        Reply(src, ('%s yalniz "%s" sinifi silahlara uyumludur.'):format(modDef.label, modDef.compatible_class))
+        return
+    end
+
+    local removeOk = pcall(function() return exports['ox_inventory']:RemoveItem(inventoryId, modItem.name, 1, nil, modSlot) end)
+    if not removeOk then
+        Reply(src, 'Modifikasyon tuketilemedi.'); return
+    end
+
+    -- ★ Global Config MUTASYONA UĞRATILMAZ (bkz. Config.BlackMarket.WeaponMods
+    -- yorumu) -- carpan/delta SADECE bu silahin metadata'sinda saklanir;
+    -- server/forensics.lua OnWeaponShotFired/ComputeMechanicalJamProbability
+    -- bu alanlari okuyup uygular.
+    local modMeta = {
+        weapon_mod_name = modItem.name,
+        full_auto       = modDef.full_auto or false,
+        jam_coefficient_multiplier   = modDef.jam_coefficient_multiplier,
+        trigger_weight_multiplier    = modDef.trigger_weight_multiplier,
+        jam_threshold_percent_delta  = modDef.jam_threshold_percent_delta
+    }
+    Matrix.Inventory.MergeMetadata(inventoryId, weaponSlot, modMeta)
+
+    Reply(src, ('%s silahiniza takildi.'):format(modDef.label))
+    Matrix.Log('BLACKMARKET', '[MOD TAKILDI] src=%d silah=%s mod=%s', src, weaponItem.name, modItem.name)
+end, false)
 
 
 -- =====================================================================

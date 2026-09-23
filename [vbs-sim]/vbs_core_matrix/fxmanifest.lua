@@ -17,7 +17,10 @@ client_scripts {
     'client/composer_intro.lua',
     'client/mercenary_followers.lua',        -- ✅ VİRGÜL EKLENDİ
     -- ★ [H4-v2][GEMINI-2] HUMINT Adaptif Takip Motoru — spawn öncesi yüklenmeli
-    'client/humint_stalking.lua'
+    'client/humint_stalking.lua',
+    -- ★ [TASK EKI] Anti-glitch PvP hareket duzeltmeleri + hayalet-bakis
+    -- (ghost-peek) tespiti + baski/tunel-gorusu vinyeti (Modul 5/6/7)
+    'client/anti_glitch.lua'
 }
 
 server_scripts {

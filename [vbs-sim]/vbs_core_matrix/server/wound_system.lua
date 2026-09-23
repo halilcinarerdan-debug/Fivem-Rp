@@ -444,6 +444,17 @@ AddEventHandler('playerDropped', function()
 end)
 
 -- =====================================================================
+-- MODUL 2: MELEE/BIÇAK SILAH HASH SETI (RNG YOK -- sabit ad listesinden
+-- GetHashKey ile bir kez turetilir, sonra tostring(hash) karsilastirilir --
+-- client'in TriggerServerEvent'e AYNEN gönderdiği format budur, bkz.
+-- client/hud.lua: weaponHashStr = tostring(weaponHash)).
+-- =====================================================================
+local MeleeWeaponHashSet = {}
+for _, weaponName in ipairs(Config.Forensics.MeleeWeaponNames or {}) do
+    MeleeWeaponHashSet[tostring(GetHashKey(weaponName))] = true
+end
+
+-- =====================================================================
 -- [KATMAN 2] OYUNCU-HASAR KANCA
 -- =====================================================================
 RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId, attackerWeaponHash)
@@ -452,6 +463,26 @@ RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId,
 
     local state = Matrix.GetOrCreatePlayerState(src)
     if not state or not state.citizenid then return end
+
+    -- ★ MODUL 2: melee/bicak hasari -> biological_blood adli kanit satiri.
+    if type(attackerWeaponHash) == 'string' and MeleeWeaponHashSet[attackerWeaponHash] then
+        attackerServerId = tonumber(attackerServerId)
+        local attackerState = (attackerServerId and attackerServerId > 0)
+            and Matrix.GetOrCreatePlayerState(attackerServerId) or nil
+        local attackerDnaId = (attackerState and attackerState.dna_id) or 'UNKNOWN'
+
+        local victimPed = GetPlayerPed(src)
+        local coords = (victimPed and victimPed ~= 0) and GetEntityCoords(victimPed) or nil
+
+        local cortisol = state.biology and state.biology.cortisol_level or 0.0
+        local fatigue   = state.biology and state.biology.fatigue_level  or 0.0
+
+        local ok, err = pcall(Matrix.Forensics.RecordBloodEvidence,
+            state.dna_id, attackerDnaId, coords, cortisol, fatigue)
+        if not ok then
+            Matrix.Log('WOUNDS', '[HATA] RecordBloodEvidence basarisiz (yutuldu): %s', tostring(err))
+        end
+    end
 
     local ballisticId = nil
 
@@ -478,6 +509,33 @@ RegisterNetEvent('matrix:server:reportPlayerWounded', function(attackerServerId,
     state.wound_ballistic_id = ballisticId
 
     Matrix.Log('WOUNDS', '[YARALANMA] %s balistik-imza #%s ile yaralandi.', state.citizenid, tostring(ballisticId))
+end)
+
+-- =====================================================================
+-- MODUL 7: BASKI (SUPPRESSION) -> KORTİZOL ARTIŞI
+-- client/anti_glitch.lua yakın-ıskalama/ateş-hattı vekilini saniyede bir
+-- (SUPPRESSION_REPORT_MS) bu event ile bildirir. RNG YOK: sabit oran
+-- (~%10/sn tam bastırmada) intensity (0..1) ile DOĞRUSAL ölçeklenir.
+-- =====================================================================
+function Matrix.Wounds.ApplySuppressionCortisol(src, intensity)
+    if type(src) ~= 'number' or src <= 0 then return end
+    local state = Matrix.GetOrCreatePlayerState(src)
+    if not state or not state.biology then return end
+
+    intensity = Matrix.Clamp(tonumber(intensity) or 0.0, 0.0, 1.0)
+    local delta = 0.10 * intensity -- ~%10/sn tam bastirmada (event ~1sn'de bir gelir)
+
+    state.biology.cortisol_level = Matrix.Clamp(state.biology.cortisol_level + delta, 0.0, 1.0)
+    TriggerClientEvent('matrix:client:cortisolSync', src, state.biology.cortisol_level)
+end
+
+RegisterNetEvent('matrix:server:reportSuppression', function(intensity)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local ok, err = pcall(Matrix.Wounds.ApplySuppressionCortisol, src, intensity)
+    if not ok then
+        Matrix.Log('WOUNDS', '[HATA] ApplySuppressionCortisol basarisiz (yutuldu): %s', tostring(err))
+    end
 end)
 
 -- =====================================================================
