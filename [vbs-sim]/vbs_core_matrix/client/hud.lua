@@ -48,17 +48,72 @@
 --   paketleme prompt'ları, ambient dekor) client/trap_house_client.lua'da
 --   AYRI bir dosyada tutulur — bu dosyanın kapsamı HUD + F10 menüsü olarak
 --   kalır (mevcut dosya ayrımıyla tutarlı).
+--
+-- ★ KATMAN 7 [HUD RE-FIT] (bu sürüm — tamamlama işleri):
+--   [R1] Eksik olan ana çizim döngüsü (per-frame render thread) eklendi:
+--        `hudActive` iken `hudLines` üstten alta, başlık/tehlike renkleriyle
+--        çizilir; sunucu paketi düşse/gecikse bile monokrom çerçeve VE
+--        "[SINYAL BEKLENIYOR]" bülteni ZORLA basılır — ekran asla bomboş
+--        kalmaz. Pasifken Wait(250) ile 0 Resmon bütçesi korunur.
+--   [R2] F10 / F6 / K / Y / G / H tüm komut+RegisterKeyMapping kancaları
+--        artık `onClientResourceStart` sarmalının İÇİNDE, tek bir yerde
+--        toplu olarak kayıt edilir — yarış koşulunda sağırlaşma riski
+--        yapısal olarak kapatılır.
+--   [R3] F10 -> "BARON TERMINALI": lib.registerContext/lib.showContext
+--        tabanlı taktik komuta menüsü. Zaten var olan tüm dialog
+--        fonksiyonlarını (Trap House, Rota Çiz, Kapı Tahkimatı, Namlu
+--        Değiştir, Tezgah Tamiri, Rütbe Ata) TEK bir kapıdan toplar; hiçbir
+--        yeni "arcade spawn" eklenmez — Canlı Kadro alt menüsü YALNIZCA
+--        `matrix:callback:getRosterReport`'un döndürdüğü, halihazırda
+--        mülakat havuzunda meşru kazanılmış/kalıcı unsurları listeler.
+--   [R4] Canlı Kadro -> Bot Aksiyon Menüsü: Operatif Tasfiye (onaylı),
+--        Denetleyici Ata, Kadro Ameliyat, Mühimmat/Envanter Ameliyatı
+--        (K1'in server/trap_house_interior.lua callback'ine bağlanır),
+--        Mühimmat Sevkiyatı (/muhimmatsevk) — hepsi zaten var olan sunucu
+--        komut/callback'lerine bağlanır, YENİ bir sunucu endpoint'i icat
+--        EDİLMEZ.
+--   [R5] 'L' tuşu / F10 -> Operasyon Not Defteri: SAF client-taraflı,
+--        sunucuya hiç round-trip yapmayan bir günlük. [K4] burada devreye
+--        girer: 'matrix:client:rendezvousAssigned' event'i artık dinlenir,
+--        GPS waypoint'i otomatik kurar VE bir defter girdisi ekler (çiğ
+--        koordinat EKRANA hiç basılmaz — yalnızca waypoint native'ine
+--        gider).
+--   [R6] 'Y' tuşu: alanda gerçek bir turnike mekaniği bu kod tabanında HİÇ
+--        yok (server tarafına dokunmak YASAK); bu yüzden Y, halihazırda var
+--        olan tek gerçek yara-bakım akışına (Config.Hospital.
+--        TreatmentCommand, hastane check-in noktası gerektirir) sarmalı bir
+--        client komutuyla bağlanır — sahte/var olmayan bir mekanik ASLA
+--        iddia edilmez.
+--   [R7] 'G'/'H' tuşları: client/mercenary_followers.lua'nın ZATEN var olan
+--        'muhafizcagir'/'muhafizsalla' komutlarına İKİNCİ birer
+--        RegisterKeyMapping girişi eklenir (o dosyadaki orijinal girişler
+--        KALDIRILMAZ — [K3] deseniyle birebir aynı "ek giriş noktası"
+--        felsefesi).
 -- =====================================================================
 
 
 local hudActive = false
 local hudLines  = {}   -- { { text=..., header=true/false, danger=true/false }, ... }
 
+-- ★ [R5] Operasyon Not Defteri — saf client-taraflı günlük (sunucu round-trip'i
+-- YOK). Her girdi { text=... } biçiminde tutulur; çiğ koordinat/sayı ASLA
+-- eklenmez (yalnızca ID + edebi/askeri etiket).
+local NotepadEntries = {}
+local MAX_NOTEPAD_ENTRIES = 32
+
 
 local COLOR_HEADER = { 235, 235, 235 }
 local COLOR_VALUE  = { 110, 255, 140 }
 local COLOR_DIM    = { 90, 140, 100 }
 local COLOR_DANGER = { 255, 70, 70 } -- ★ [U3][U5]: mekanik tutukluk / sinyal ucgenleme uyarilari
+
+
+-- ★ [R1] Ana çizim döngüsü geometrisi — sabit, saf metin, HTML/CSS YOK.
+local HUD_BASE_X      = 0.015
+local HUD_BASE_Y      = 0.04
+local HUD_LINE_HEIGHT = 0.021
+local HUD_TEXT_SCALE  = 0.33
+local HUD_FRAME_TEXT  = '========================================'
 
 
 local MAX_HUD_LINES  = (Config.Hud and Config.Hud.MaxHudLines) or 64
@@ -363,27 +418,133 @@ RegisterNetEvent('matrix:client:hudSnapshot', function(lines)
 end)
 
 
-RegisterCommand('hud', function()
-    ToggleHud()
-end, false)
+-- ★ [R2]-[R5] ileri bildirimler: bu fonksiyonların GÖVDESİ dosyanın çok
+-- daha aşağısında (F10 Baron Terminali bölümü) tanımlanır, ancak
+-- `onClientResourceStart` içindeki RegisterCommand closure'ları BURADAN
+-- (yukarıdan) bu local'lere referans verir — mevcut OpenAssignInspectorDialog
+-- ileri-bildirim deseniyle (KATMAN 5 ULTIMATE [U2]) birebir aynı disiplin.
+local OpenBaronTerminaliMenu
+local OpenCanliKadroMenu
+local OpenBotActionsMenu
+local OpenMatrixNotepad
 
 
-RegisterKeyMapping('hud', 'Taktik HUD ac/kapat', 'keyboard', Config.Hud and Config.Hud.ToggleKey or 'F6')
+-- =====================================================================
+-- ★ [R1] ANA ÇİZİM DÖNGÜSÜ (per-frame render thread) — daha önce EKSİKTİ.
+-- `hudActive` iken hudLines üstten alta çizilir; header=true beyaz,
+-- danger=true kırmızı, geri kalanı yeşil (COLOR_VALUE) basılır. Sunucudan
+-- paket hiç gelmemiş/gecikmiş olsa bile ("ağ gecikmesi veya local dedicated
+-- NAT Loopback engeli") çerçeve + bir "SINYAL BEKLENIYOR" bülteni ZORLA
+-- (force render) çizilir — ekran asla bomboş kalmaz. Pasifken Wait(250)
+-- ile 0 Resmon bütçesi korunur; aktifken Wait(0) gerekir (her frame taze
+-- metin/renk basılmalı).
+-- =====================================================================
+CreateThread(function()
+    while true do
+        if hudActive then
+            local y = HUD_BASE_Y
 
 
--- ★ [U5] COMINT: aynı HUD'u açan/kapatan ikinci bir tuş bağı. Ayrı bir
--- panel/render thread AÇILMAZ — [COMINT ISTIHBARAT PROFILI] bloğu zaten
--- ana snapshot'ın bir parçasıdır (bkz. server/market.lua BuildSnapshot).
-RegisterCommand('comintpanel', function()
-    ToggleHud()
-end, false)
-RegisterKeyMapping('comintpanel', 'COMINT Istihbarat Profili (Taktik HUD) ac/kapat', 'keyboard', (Config.Comint and Config.Comint.ToggleKey) or 'K')
+            DrawMonoLine(HUD_BASE_X, y, HUD_FRAME_TEXT, COLOR_DIM[1], COLOR_DIM[2], COLOR_DIM[3], HUD_TEXT_SCALE)
+            y = y + HUD_LINE_HEIGHT
+            DrawMonoLine(HUD_BASE_X, y, '[MATRIX TAKTIK DURUM HUD]', COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3], HUD_TEXT_SCALE)
+            y = y + HUD_LINE_HEIGHT
 
 
+            if #hudLines == 0 then
+                -- ★ [R1] Force-render fallback: veri akışı yoksa/gecikmişse dahi
+                -- ekran boş kalmaz, durum açıkça bildirilir.
+                DrawMonoLine(HUD_BASE_X, y, '[SINYAL BEKLENIYOR — VERI AKISI YOK]', COLOR_DIM[1], COLOR_DIM[2], COLOR_DIM[3], HUD_TEXT_SCALE)
+                y = y + HUD_LINE_HEIGHT
+            else
+                for i = 1, #hudLines do
+                    local line = hudLines[i]
+                    local r, g, b = COLOR_VALUE[1], COLOR_VALUE[2], COLOR_VALUE[3]
+                    if line.danger then
+                        r, g, b = COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3]
+                    elseif line.header then
+                        r, g, b = COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3]
+                    end
+                    DrawMonoLine(HUD_BASE_X, y, line.text, r, g, b, HUD_TEXT_SCALE)
+                    y = y + HUD_LINE_HEIGHT
+                end
+            end
+
+
+            DrawMonoLine(HUD_BASE_X, y, HUD_FRAME_TEXT, COLOR_DIM[1], COLOR_DIM[2], COLOR_DIM[3], HUD_TEXT_SCALE)
+            Wait(0)
+        else
+            Wait(250)
+        end
+    end
+end)
+
+
+-- =====================================================================
+-- ★ [R2] GİRDİ KAYITLARI — F10 / F6 / K / Y / G / H — TEK SARMAL
+-- Tüm RegisterCommand + RegisterKeyMapping çağrıları burada, tek bir
+-- `onClientResourceStart` handler'ının İÇİNDE toplanır; kaynak (yeniden)
+-- başladığında tüm girdiler AYNI ANDA ve eksiksiz bağlanır — hiçbiri bir
+-- önceki frame'in yarım kalmış bir kaydına bağımlı kalmaz (yarış koşulu
+-- yapısal olarak kapatılır). Menü/aksiyon fonksiyonlarının kendisi bu
+-- dosyanın DAHA AŞAĞISINDA (F10 Baron Terminali bölümü) tanımlanır; local
+-- forward-bildirimleri sayesinde bu closure'lar onlara güvenle referans
+-- verir (mevcut OpenAssignInspectorDialog vb. deseniyle birebir aynı).
+-- =====================================================================
 AddEventHandler('onClientResourceStart', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
     hudActive = false
     hudLines  = {}
+
+
+    -- F6: Taktik HUD ac/kapat.
+    RegisterCommand('hud', function()
+        ToggleHud()
+    end, false)
+    RegisterKeyMapping('hud', 'Taktik HUD ac/kapat', 'keyboard', Config.Hud and Config.Hud.ToggleKey or 'F6')
+
+
+    -- ★ [U5] K: aynı HUD'u açan/kapatan ikinci bir tuş bağı. Ayrı bir
+    -- panel/render thread AÇILMAZ — [COMINT ISTIHBARAT PROFILI] bloğu zaten
+    -- ana snapshot'ın bir parçasıdır (bkz. server/market.lua BuildSnapshot).
+    RegisterCommand('comintpanel', function()
+        ToggleHud()
+    end, false)
+    RegisterKeyMapping('comintpanel', 'COMINT Istihbarat Profili (Taktik HUD) ac/kapat', 'keyboard', (Config.Comint and Config.Comint.ToggleKey) or 'K')
+
+
+    -- ★ [R3] F10: Baron Terminali (Taktik Komuta Menüsü).
+    RegisterCommand('baronterminali', function()
+        OpenBaronTerminaliMenu()
+    end, false)
+    RegisterKeyMapping('baronterminali', 'Baron Terminali (Taktik Komuta Menusu)', 'keyboard', 'F10')
+
+
+    -- ★ [R5] L: Operasyon Not Defterini F10'a girmeden doğrudan açar ([K3]
+    -- deseniyle birebir aynı — F10 içindeki giriş de AYRICA kalır).
+    RegisterCommand('notdefteri', function()
+        OpenMatrixNotepad()
+    end, false)
+    RegisterKeyMapping('notdefteri', 'Operasyon Not Defterini Ac', 'keyboard', 'L')
+
+
+    -- ★ [R6] Y: Taktik Turnike / Yara Bakımı. Gerçek mekanik zaten
+    -- server/wound_system.lua'da (Config.Hospital.TreatmentCommand) var —
+    -- burada YALNIZCA o komuta sarmalı bir kısayol tuşu eklenir, sahte bir
+    -- mekanik icat EDİLMEZ.
+    RegisterCommand('taktikturnike', function()
+        ExecuteCommand(tostring((Config.Hospital and Config.Hospital.TreatmentCommand) or 'tedaviol'))
+    end, false)
+    RegisterKeyMapping('taktikturnike', 'Taktik Turnike / Yara Bakimi (Hastane Check-in Noktasinda)', 'keyboard', 'Y')
+
+
+    -- ★ [R7] G/H: Hızlı Tim Atama/Emir. Komutların KENDİSİ zaten
+    -- client/mercenary_followers.lua'da RegisterCommand ile tanımlı
+    -- ('muhafizcagir'/'muhafizsalla'); burada yalnızca İKİNCİ birer
+    -- RegisterKeyMapping girişi eklenir (o dosyadaki orijinal girişler
+    -- KALDIRILMAZ).
+    RegisterKeyMapping('muhafizcagir', 'Hizli Tim Atama: Fiziksel Muhafiz/Kurye Cagir', 'keyboard', 'G')
+    RegisterKeyMapping('muhafizsalla', 'Hizli Tim Emri: Tum Takipcileri Serbest Birak', 'keyboard', 'H')
 end)
 
 -- =====================================================================
@@ -856,6 +1017,302 @@ local OpenAssignInspectorDialog -- ileri bildirim (OpenBotActionsMenu tarafında
 local OpenBotInventoryOpsMenu   -- ★ KATMAN 6: ileri bildirim
 local OpenGiveItemToBotDialog   -- ★ KATMAN 6: ileri bildirim
 local OpenAmmoRunDialog         -- ★ KATMAN 7 [T2]: ileri bildirim
+
+
+--- ★ KATMAN 5 ULTIMATE [U4]: Bir bota "Denetleyici Ata" — hedef bölge
+--- shared/config.lua Config.Market.Zones'tan (paylaşımlı, client'ta zaten
+--- görünür) derlenir; ExecuteCommand'a yalnızca whitelist'teki zoneId
+--- geçer (harf/quote/vb. YOK, tamamen sayısal select).
+OpenAssignInspectorDialog = function(botId)
+    local zoneOptions = {}
+    for _, zone in ipairs(Config.Market and Config.Market.Zones or {}) do
+        zoneOptions[#zoneOptions + 1] = { value = tostring(zone.id), label = zone.label or ('Bolge #' .. tostring(zone.id)) }
+    end
+    if #zoneOptions == 0 then
+        NotifyInvalidInput('Tanimli bolge yok.')
+        return
+    end
+
+
+    local input = lib.inputDialog(('Denetleyici Ata — Bot #%d'):format(botId), {
+        { type = 'select', label = 'Bolge', required = true, options = zoneOptions }
+    })
+    if not input then return end
+
+
+    local zoneId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    if not zoneId then NotifyInvalidInput('Bolge secimi gecersiz.'); return end
+
+
+    ExecuteCommand(('denetleyiciata %s %d'):format(zoneId, botId))
+end
+
+
+--- ★ KATMAN 6 [K1]: Bota elden teslimat — SanitizeNumericArg ile AYNI
+--- disiplinde sanitize edilen slot/miktar 'matrix:server:trapHouseInterior:
+--- giveItemToBot' event'ine (server/trap_house_interior.lua) iletilir.
+OpenGiveItemToBotDialog = function(botId)
+    local input = lib.inputDialog(('Esya Teslim Et — Bot #%d'):format(botId), {
+        { type = 'number', label = 'Kendi Envanter Slotunuz', required = true, min = 1, max = 999 },
+        { type = 'number', label = 'Miktar', required = true, min = 1, max = 9999, default = 1 }
+    })
+    if not input then return end
+
+
+    local slot = SanitizeNumericArg(input[1], 1, 999)
+    if not slot then NotifyInvalidInput('Slot numarasi gecersiz.'); return end
+
+
+    local count = SanitizeNumericArg(input[2], 1, 9999)
+    if not count then NotifyInvalidInput('Miktar gecersiz.'); return end
+
+
+    TriggerServerEvent('matrix:server:trapHouseInterior:giveItemToBot', botId, tonumber(slot), tonumber(count))
+end
+
+
+--- ★ KATMAN 6 [K1]: "Mühimmat / Envanter Ameliyatı" — bot envanterini
+--- (server/trap_house_interior.lua lib.callback'i) SALT-OKUNUR olarak
+--- listeler; tek aksiyon "Esya Teslim Et" alt-diyaloğu açar.
+OpenBotInventoryOpsMenu = function(botId)
+    local items = lib.callback.await('matrix:callback:getBotInventoryItems', false, botId)
+    if type(items) ~= 'table' then items = {} end
+
+
+    local options = {
+        {
+            title       = '[ESYA TESLIM ET]',
+            description = 'Kendi envanterinizden bota bir esya elden teslim edin.',
+            icon        = 'hand-holding',
+            onSelect    = function() OpenGiveItemToBotDialog(botId) end
+        }
+    }
+
+
+    for i = 1, #items do
+        local item = items[i]
+        options[#options + 1] = {
+            title       = ('[SLOT %d] %s'):format(item.slot or 0, item.label or item.name or '?'),
+            description = ('Miktar: %d'):format(tonumber(item.count) or 1),
+            disabled    = true
+        }
+    end
+
+
+    lib.registerContext({
+        id      = 'matrix_bot_inventory_ops',
+        title   = ('MUHIMMAT / ENVANTER AMELIYATI — Bot #%d'):format(botId),
+        menu    = 'matrix_bot_actions',
+        options = options
+    })
+    lib.showContext('matrix_bot_inventory_ops')
+end
+
+
+--- ★ KATMAN 7 [T2]: "Mühimmat Sevkiyatı" — mevcut '/muhimmatsevk
+--- [lojistikBotId] [tetikciBotId]' komutuna (server/logistics.lua
+--- Matrix.Logistics.DispatchAmmoRun) sarmalı diyalog. Bot Aksiyon
+--- Menüsünden açılırsa tıklanan bot HEDEF (tetikçi) olarak önceden
+--- doldurulur — kaynak (lojistik) bot ID'si HER ZAMAN ayrıca sorulur.
+OpenAmmoRunDialog = function(prefilledTargetBotId)
+    local input = lib.inputDialog('Muhimmat Sevkiyati (/muhimmatsevk)', {
+        { type = 'number', label = 'Lojistik Bot ID (kaynak)', required = true, min = 1, max = MAX_BOT_ID },
+        {
+            type = 'number', label = 'Tetikci Bot ID (hedef)', required = true, min = 1, max = MAX_BOT_ID,
+            default = prefilledTargetBotId and tonumber(prefilledTargetBotId) or nil
+        }
+    })
+    if not input then return end
+
+
+    local sourceBotId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    if not sourceBotId then NotifyInvalidInput('Lojistik Bot ID gecersiz.'); return end
+
+
+    local targetBotId = SanitizeNumericArg(input[2], 1, MAX_BOT_ID)
+    if not targetBotId then NotifyInvalidInput('Tetikci Bot ID gecersiz.'); return end
+
+
+    ExecuteCommand(('muhimmatsevk %s %s'):format(sourceBotId, targetBotId))
+end
+
+
+--- ★ KATMAN 5 ULTIMATE [U2] + KATMAN 6 [K1] + KATMAN 7 [T2]: Canlı Kadro'daki
+--- bir BOT satırına tıklanınca açılan aksiyon menüsü. Yalnızca zaten var
+--- olan komut/callback'lere bağlanır — hiçbir yeni bot/ped SPAWN EDİLMEZ.
+OpenBotActionsMenu = function(botId, roleLabel)
+    lib.registerContext({
+        id    = 'matrix_bot_actions',
+        title = ('[BOT-ID: %d] AKSIYON MENUSU'):format(botId),
+        menu  = 'matrix_canli_kadro',
+        options = {
+            {
+                title       = '[OPERATIF TASFIYE]',
+                description = 'Bu unsuru matristen KALICI olarak siler (Hard-Delete). GERI ALINAMAZ.',
+                icon        = 'user-slash',
+                onSelect    = function()
+                    local confirmed = lib.alertDialog({
+                        header    = 'Operatif Tasfiye Onayi',
+                        content   = ('Bot #%d KALICI olarak tasfiye edilecek. Bu islem GERI ALINAMAZ.'):format(botId),
+                        centered  = true,
+                        cancel    = true
+                    })
+                    if confirmed == 'confirm' then
+                        ExecuteCommand(('operatiftasfiye %d'):format(botId))
+                    end
+                end
+            },
+            {
+                title       = '[DENETLEYICI ATA]',
+                description = 'Bu unsuru bir Bolge Denetleyicisi (SIGINT/COMINT) olarak atar.',
+                icon        = 'user-shield',
+                onSelect    = function() OpenAssignInspectorDialog(botId) end
+            },
+            {
+                title       = '[KADRO AMELIYAT]',
+                description = 'Trap house ic mekaninda tibbi tedaviye alir (uzuv hasarini sifirlar).',
+                icon        = 'user-doctor',
+                onSelect    = function() ExecuteCommand(('kadroameliyat %d'):format(botId)) end
+            },
+            {
+                title       = '[MUHIMMAT / ENVANTER AMELIYATI]',
+                description = 'Bot envanterini goruntule, kendi envanterinden esya teslim et.',
+                icon        = 'boxes-stacked',
+                onSelect    = function() OpenBotInventoryOpsMenu(botId) end
+            },
+            {
+                title       = '[MUHIMMAT SEVKIYATI]',
+                description = 'Bu botu tetikci (hedef) yaparak bir lojistik sevkiyati baslat.',
+                icon        = 'truck-fast',
+                onSelect    = function() OpenAmmoRunDialog(botId) end
+            }
+        }
+    })
+    lib.showContext('matrix_bot_actions')
+end
+
+
+--- ★ [R3] Canlı Kadro — 'matrix:callback:getRosterReport' (server/main.lua)
+--- ZATEN var olan, mülakat havuzunda meşru kazanılmış/pasifte bekleyen
+--- kalıcı unsurları listeler. BOT satırına tıklamak OpenBotActionsMenu'yu
+--- açar; PLAYER satırları salt bilgi amaçlıdır (aksiyon YOK).
+OpenCanliKadroMenu = function()
+    local entries = lib.callback.await('matrix:callback:getRosterReport', false)
+    if type(entries) ~= 'table' then entries = {} end
+
+
+    local options = {}
+    for i = 1, #entries do
+        local entry = entries[i]
+        if type(entry) == 'table' and type(entry.text) == 'string' then
+            if entry.kind == 'bot' and type(entry.id) == 'number' then
+                options[#options + 1] = {
+                    title       = entry.text,
+                    icon        = entry.mole_flagged and 'triangle-exclamation' or 'user',
+                    onSelect    = function() OpenBotActionsMenu(entry.id, entry.role) end
+                }
+            else
+                options[#options + 1] = { title = entry.text, disabled = true }
+            end
+        end
+    end
+    if #options == 0 then
+        options[1] = { title = '[KAYITLI UNSUR YOK]', disabled = true }
+    end
+
+
+    lib.registerContext({
+        id      = 'matrix_canli_kadro',
+        title   = '[CANLI KADRO]',
+        menu    = 'matrix_baron_terminali',
+        options = options
+    })
+    lib.showContext('matrix_canli_kadro')
+end
+
+
+--- ★ [R5] Operasyon Not Defteri — saf client-taraflı günlük. Girdi ekleme
+--- YALNIZCA 'matrix:client:rendezvousAssigned' event'i (K4) üzerinden
+--- otomatik olur; burada yalnızca GÖRÜNTÜLENİR.
+OpenMatrixNotepad = function()
+    local options = {}
+    for i = 1, #NotepadEntries do
+        options[#options + 1] = { title = NotepadEntries[i].text, disabled = true }
+    end
+    if #options == 0 then
+        options[1] = { title = '[DEFTER BOS — HENUZ KAYITLI BULUSMA/NOT YOK]', disabled = true }
+    end
+
+
+    lib.registerContext({
+        id      = 'matrix_notepad',
+        title   = '[OPERASYON NOT DEFTERI]',
+        menu    = 'matrix_baron_terminali',
+        options = options
+    })
+    lib.showContext('matrix_notepad')
+end
+
+
+--- ★ [R3] F10 — Baron Terminali: tüm dialog/aksiyon fonksiyonlarını TEK
+--- bir taktik komuta menüsünden toplar. Hiçbir "arcade spawn" (yoktan adam
+--- doğurma) seçeneği YOKTUR — yalnızca zaten var olan kalıcı unsurları
+--- (Canlı Kadro), kapı barikatlarını, otonom rota sevklerini ve mühimmat
+--- takaslarını yönetir.
+OpenBaronTerminaliMenu = function()
+    lib.registerContext({
+        id    = 'matrix_baron_terminali',
+        title = '[BARON TERMINALI]',
+        options = {
+            { title = '[CANLI KADRO]',            description = 'Kayitli unsurlari listele / aksiyon menusunu ac.', icon = 'users',            onSelect = function() OpenCanliKadroMenu() end },
+            { title = '[TRAP HOUSE SORGUSU]',      description = 'Bir trap house\'un guncel durumunu sorgula.',        icon = 'house-lock',       onSelect = function() OpenTrapHouseDurumDialog() end },
+            { title = '[TRAP HOUSE\'A GIT]',       description = 'Kayitli bir trap house icin GPS waypoint ayarla.',   icon = 'location-dot',     onSelect = function() OpenTrapHouseWaypointDialog() end },
+            { title = '[ROTA CIZ]',                description = 'Multi-waypoint taktik rota (otomatik intikal).',      icon = 'route',            onSelect = function() OpenRotaCizDialog() end },
+            { title = '[KAPI SURGU TAHKIMATI]',    description = 'Bir trap house kapisini sirali seviyede tahkim et.', icon = 'shield-halved',    onSelect = function() OpenDoorReinforcementDialog() end },
+            { title = '[RUTBE ATAMASI]',           description = 'Hiyerarsi rutbesi ata (Leader/Lojistik/Kimyager).',  icon = 'ranking-star',     onSelect = function() OpenRutbeAtaDialog() end },
+            { title = '[NAMLU DEGISTIR]',          description = 'Elinizdeki silahin namlusunu degistir.',              icon = 'gun',              onSelect = function() OpenNamluDegistirAction() end },
+            { title = '[TEZGAHTA TAMIR]',          description = 'Elinizdeki silahi is tezgahinda tamir et.',           icon = 'screwdriver-wrench', onSelect = function() OpenWorkbenchRepairAction() end },
+            { title = '[MUHIMMAT SEVKIYATI]',      description = 'Lojistik bot -> Tetikci bot muhimmat sevki baslat.', icon = 'truck-fast',       onSelect = function() OpenAmmoRunDialog() end },
+            { title = '[FIZIKSEL MUHAFIZ CAGIR]',  description = 'Kayitli kalici muhafiz/kurye takipcisi cagir.',      icon = 'user-plus',        onSelect = function() ExecuteCommand('muhafizcagir') end },
+            { title = '[TIM EMRI: SERBEST BIRAK]', description = 'Tum fiziksel takipcileri serbest birak.',            icon = 'user-xmark',       onSelect = function() ExecuteCommand('muhafizsalla') end },
+            { title = '[OPERASYON NOT DEFTERI]',   description = 'Otomatik kaydedilen bulusma/rota notlarini goruntule.', icon = 'book',          onSelect = function() OpenMatrixNotepad() end },
+            { title = '[MATRIX DUMP]',             description = 'Tanilama dokumu (debug).',                            icon = 'bug',              onSelect = function() OpenMatrixDump() end }
+        }
+    })
+    lib.showContext('matrix_baron_terminali')
+end
+
+
+--- ★ [K4] server/rendezvous.lua bir karaborsa silah/mühimmat buluşması
+--- ayarladığında GPS waypoint'ini otomatik kurar VE Operasyon Not
+--- Defterine bir girdi ekler. Çiğ koordinat [S1] sanitizasyonuna tabi
+--- DEĞİLDİR (giden bir ExecuteCommand argümanı değil, sunucudan gelen
+--- güvenilir veridir) — ama EKRANA da hiç basılmaz, yalnızca SetNewWaypoint
+--- native'ine gider (Sıfır Sayı Standardı defterde de geçerlidir).
+RegisterNetEvent('matrix:client:rendezvousAssigned', function(payload)
+    if type(payload) ~= 'table' or type(payload.coords) ~= 'vector3' then return end
+
+
+    SetNewWaypoint(payload.coords.x, payload.coords.y)
+
+
+    NotepadEntries[#NotepadEntries + 1] = {
+        text = ('[BULUSMA #%s] %s — Waypoint ayarlandi.'):format(tostring(payload.handoff_id or '?'), tostring(payload.label or 'Karaborsa Teslimati'))
+    }
+    while #NotepadEntries > MAX_NOTEPAD_ENTRIES do
+        table.remove(NotepadEntries, 1)
+    end
+
+
+    if lib and lib.notify then
+        lib.notify({
+            title       = '[RENDEZVOUS]',
+            description = 'Bulusma noktasi ayarlandi ve Not Defterine eklendi.',
+            type        = 'inform'
+        })
+    end
+end)
+
 
 -- [FAZ 1] Darkchat parola sonucu
 RegisterNetEvent('matrix:client:darkchat:passphraseResult', function(ok, reason, trapHouseId)
