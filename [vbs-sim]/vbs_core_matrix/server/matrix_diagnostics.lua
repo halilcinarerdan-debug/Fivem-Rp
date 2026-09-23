@@ -368,6 +368,79 @@ AddCheck('Config Ped Bekcisi: BotPedConfiguration rutbe atamalari katı string',
     return true, ('%d rutbe dogrulandi'):format(#requiredRanks)
 end)
 
+-- =====================================================================
+-- ★ [Aşama 8] YENİ ALT SİSTEMLER — F10/Bot Kimliği/Eldiven-Maske-CCTV/
+-- Suç Ortağı Yayılımı. Her check "0 RNG" ilkesine uygun: aynı girdi ile
+-- aynı çıktının garanti edildiğini (ya da gerekli fonksiyon/config'in
+-- gerçekten var olduğunu) doğrular.
+-- =====================================================================
+
+AddCheck('BotIdentityPool: Matrix.ResolveBotIdentity deterministik', function()
+    if type(Matrix.ResolveBotIdentity) ~= 'function' then
+        return false, 'Matrix.ResolveBotIdentity tanimli degil'
+    end
+    local pool = Config.BotIdentityPool
+    if type(pool) ~= 'table' or type(pool.PedModels) ~= 'table' or type(pool.Callsigns) ~= 'table' or #pool.Callsigns == 0 then
+        return false, 'Config.BotIdentityPool eksik/bos'
+    end
+
+    -- Sahte bir bot kaydı ile İKİ KEZ çağırıp aynı sonucu ürettiğini
+    -- doğrula -- bu, RNG SIZINTISI olmadığının doğrudan kanıtıdır.
+    local probe = { id = 4242, role = 'guard', name = 'DiagnosticsProbe' }
+    local model1, hash1, name1 = Matrix.ResolveBotIdentity(probe)
+    local model2, hash2, name2 = Matrix.ResolveBotIdentity(probe)
+    if model1 ~= model2 or hash1 ~= hash2 or name1 ~= name2 then
+        return false, 'Ayni bot.id icin farkli sonuc uretildi (RNG sizintisi supheli)'
+    end
+    if type(model1) ~= 'string' or model1 == '' or type(name1) ~= 'string' or name1 == '' then
+        return false, 'ped modeli/rumuz bos donuyor'
+    end
+    return true, ('probe#%d -> %s (%s)'):format(probe.id, name1, model1)
+end)
+
+AddCheck('Forensics: Eldiven/Maske/CCTV konfigurasyonu gecerli', function()
+    local f = Config.Forensics
+    if type(f.GloveItemName) ~= 'string' or f.GloveItemName == '' then return false, 'GloveItemName bos' end
+    if type(f.MaskItemName) ~= 'string' or f.MaskItemName == '' then return false, 'MaskItemName bos' end
+    if type(f.GloveFingerprintReduction) ~= 'number' or f.GloveFingerprintReduction <= 0 or f.GloveFingerprintReduction > 1.0 then
+        return false, 'GloveFingerprintReduction (0,1] araliginda degil'
+    end
+    if type(Matrix.Forensics.SetGlovesWorn) ~= 'function' or type(Matrix.Forensics.SetMaskWorn) ~= 'function' then
+        return false, 'Matrix.Forensics.SetGlovesWorn/SetMaskWorn tanimli degil'
+    end
+    if type(Matrix.Forensics.MaybeLogCCTVSighting) ~= 'function' then
+        return false, 'Matrix.Forensics.MaybeLogCCTVSighting tanimli degil'
+    end
+    -- ★ CCTV zon listesi İKİNCİ bir tablo İCAT EDİLMEDEN Config.Market.Zones'u
+    -- yeniden kullanır -- bu baglanti canli tutuluyor mu diye dogrula.
+    if type(Config.Market) ~= 'table' or type(Config.Market.Zones) ~= 'table' or #Config.Market.Zones == 0 then
+        return false, 'Config.Market.Zones (CCTV zon kaynagi) bos/tanimsiz'
+    end
+    return true, ('eldiven=%s maske=%s zon=%d'):format(f.GloveItemName, f.MaskItemName, #Config.Market.Zones)
+end)
+
+AddCheck('Bureau.PropagateAccomplices tanimli (tutuklanma yayilimi)', function()
+    if type(Matrix.Bureau.PropagateAccomplices) ~= 'function' then
+        return false, 'Matrix.Bureau.PropagateAccomplices tanimli degil'
+    end
+    -- Bos/gecersiz dna_id ile guvenli (0 sonuc) donmeli -- DB'ye
+    -- ulasilamasa/kayit olmasa bile fonksiyon patlamamali.
+    local ok, affected = pcall(Matrix.Bureau.PropagateAccomplices, '')
+    if not ok then return false, ('pcall hata: %s'):format(tostring(affected)) end
+    if affected ~= 0 then return false, 'bos dna_id ile 0 disinda sonuc dondu' end
+    return true, 'safe-exit dogrulandi'
+end)
+
+AddCheck('Mercenary: kalici kadro/komut modu export yuzeyi tam', function()
+    local required = { 'GetFollowerRoster', 'SetFollowerMode' }
+    for _, fname in ipairs(required) do
+        if type(Matrix.Mercenary[fname]) ~= 'function' then
+            return false, ('Matrix.Mercenary.%s tanimli degil'):format(fname)
+        end
+    end
+    return true, ('%d fonksiyon dogrulandi'):format(#required)
+end)
+
 local MAP_MIN_XY, MAP_MAX_XY = -6000.0, 8000.0
 local MAP_MIN_Z, MAP_MAX_Z   = -200.0, 1200.0
 
