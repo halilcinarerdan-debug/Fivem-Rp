@@ -698,6 +698,24 @@ local function _ToVec3(v)
     return v
 end
 
+--- ★ [OYUNCU RAPORU] "Ajanlarımıza yumruk atınca/yanlışlıkla saldırınca
+--- bizden kaçmasınlar, karşılık vermesinler." Bu bot ped'leri hiçbir
+--- SetPedFleeAttributes/SetPedCombatAttributes/SetPedRelationshipGroupHash
+--- taşımıyordu -- yani GTA'nın VARSAYILAN ped AI'sı (kaç/karşılık ver)
+--- aynen çalışıyordu. client/mercenary_followers.lua'nın KENDİ takipçi
+--- ped'lerinde ZATEN kullandığı AYNI desen (relationship group = PLAYER,
+--- flee kapalı) burada da uygulanır -- bot "ölümü" tamamen bu resource'un
+--- KENDİ combat_damage sayaç sistemi (Matrix.Logistics.ApplyCombatDamage)
+--- ile yönetildiğinden, ped'in GTA'nın doğal kaç/dövüş tepkisine
+--- ihtiyacı YOKTUR.
+local function ApplyAgentCombatImmunity(ped)
+    if not ped or ped == 0 then return end
+    pcall(SetPedFleeAttributes, ped, 0, false)
+    pcall(SetBlockingOfNonTemporaryEvents, ped, true)
+    pcall(SetPedRelationshipGroupHash, ped, GetHashKey('PLAYER'))
+    pcall(SetPedCombatAttributes, ped, 46, false)
+end
+
 local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstDestination)
     local pedHash = ResolveRolePedModel(bot.role)
     local isFoot  = (vehicleType == 'foot')
@@ -714,6 +732,7 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
         pcall(SetEntityOrphanMode, ped, 2)
         pcall(SetEntityRoutingBucket, ped, 0)
         SetEntityCoords(ped, origin.x, origin.y, origin.z, false, false, false, false)
+        ApplyAgentCombatImmunity(ped)
 
         local taskOk = pcall(TaskFollowNavMeshToCoord,
             ped,
@@ -745,6 +764,7 @@ local function SpawnDispatchActors(bot, origin, vehicleType, cruiseSpeed, firstD
         end
         pcall(SetEntityOrphanMode, ped, 2)
         pcall(SetEntityRoutingBucket, ped, 0)
+        ApplyAgentCombatImmunity(ped)
 
         local taskOk = pcall(TaskVehicleDriveToCoord,
             ped,
