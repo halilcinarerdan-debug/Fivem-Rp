@@ -674,7 +674,46 @@ Config.HitSquad = {
     VehicleModel = 'sultan2',
     PedModel     = 'g_m_y_ballasout_01',
     Weapon       = 'WEAPON_MICROSMG',
-    PedAccuracy  = 70
+    PedAccuracy  = 70,
+
+    -- =================================================================
+    -- ★ [MODUL 10] AMBUSH GATING — "sadece oyuncu bosta/AFK diye" cete
+    -- ambush'i ASLA tetiklenmez. server/gang_hoods.lua'nin ZATEN VAR OLAN
+    -- matrix_gang_hoods.control_ratio alani (bir mahallenin oyuncu
+    -- hiyerarsisine gore ne kadar "kendi" / sadik oldugunu, dolayisiyla
+    -- ZIT ucta ne kadar HUSUMETLI/tartismali oldugunu) VE loot_opened_at
+    -- (o mahallede yakin zamanda gercek bir kiskirtma/yagma olayi
+    -- yasandigini) IKINCI bir "husumet" tablosu ICAT EDILMEDEN dogrudan
+    -- okur. control_ratio DUSUK ise (kontrol kaybedilmis/tartismali) VEYA
+    -- yagma penceresi Config.GangHoods.LootWindowSeconds icinde acildiysa
+    -- husumet AKTIF sayilir; ikisi de degilse o tick icin ambush TAMAMEN
+    -- ATLANIR.
+    -- =================================================================
+    -- control_ratio bu esigin ALTINA dusmeden (yani mahalle hala byk
+    -- oranda "sadik/kendi" sayilirken) pasif/AFK bir oyuncuya ambush
+    -- gonderilmez.
+    HostileControlRatioThreshold = 0.85,
+
+    -- loot_opened_at bu kadar saniye icinde acilmissa "yakin zamanda
+    -- kiskirtilmis" sayilir. Config.GangHoods (bu dosyada DAHA ASAGIDA
+    -- tanimlanir, ileri-referans YOK) henuz mevcut degilken bu tablo
+    -- olusturuluyor -- bu yuzden server/hitsquad.lua CALISMA ZAMANINDA
+    -- (Config.GangHoods.LootWindowSeconds or bu varsayilan) okur; ikinci
+    -- bir pencere suresi ICAT EDILMEZ, yalnizca ayni degeri (120) burada
+    -- da tasir.
+    ProvocationWindowSeconds = 120,
+
+    -- ★ [MODUL 10] KOLEKTIF HEDEFLEME — driveby hedef havuzu artik yalniz
+    -- PlayerPedId() DEGIL, oyuncu + Config.Mercenary.CombatAggroRadius
+    -- icindeki muhafiz/takipci botlari da icerir (server/mercenary_followers.
+    -- lua'nin ZATEN VAR OLAN FollowerNetIds takibi okunur, ikinci bir
+    -- "takipci konumu" sistemi ICAT EDILMEZ). RNG YOK: havuz icinden
+    -- SADECE en yakin hedef secilir (mesafeye gore deterministik siralama,
+    -- esitlikte netId'ye gore sabit tie-break).
+    -- NOT: Config.Mercenary bu dosyada DAHA ASAGIDA tanimlanir (ileri-
+    -- referans YOK), bu yuzden deger burada Config.Mercenary.CombatAggroRadius
+    -- ILE AYNI (35.0) sabit yazilir -- ikisi ayni fiziksel menzili ifade eder.
+    AllyTargetScanRadius = 35.0
 }
 
 
@@ -1179,7 +1218,28 @@ Config.Mercenary = {
     -- Performans: mesafe/araç kontrolleri her frame DEĞİL, bu aralıkta
     -- çalışan hafif bir önbellek üzerinden yürütülür.
     CheckIntervalMs       = 1500,
-    SummonCooldownMs      = 5000
+    SummonCooldownMs      = 5000,
+
+    -- =================================================================
+    -- ★ [MODUL 11] HOLD/GUARD/OBSERVE NAVMESH KİLİDİ — bkz. client/
+    -- mercenary_followers.lua refresh döngüsü. Bir takipçi hold/guard/
+    -- observe moduna atandığında, ankraj noktasının bu yarıçapı İÇİNE
+    -- ulaştığı an TaskGoToCoordAnyMeans/TaskGoToEntity ARTIK YENİDEN
+    -- YAYINLANMAZ (NavMesh çırpınması/jitter önlenir) -- yalnızca durum
+    -- değişince (yeni ankraj ataması veya tehdit tespiti) görev yeniden
+    -- yayınlanır.
+    -- =================================================================
+    HoldAnchorRadius      = 1.5,
+
+    -- Ankraja ulaşınca TaskAchieveHeading ile önce emrin verildiği anda
+    -- oyuncunun baktığı yöne kilitlenir (bu süre içinde).
+    HoldHeadingLockMs     = 3000,
+
+    -- Ankraj sonrası ped'i sahada TUTAN nöbet duruşu -- codebase'in
+    -- ZATEN VAR OLAN TaskStartScenarioInPlace deseniyle (bkz. client/
+    -- trap_house_client.lua, Config.TrapHouseInterior.AmbientScenarios)
+    -- AYNI native; ikinci bir "durma" mekanizması İCAT EDİLMEZ.
+    GuardScenario         = 'WORLD_HUMAN_GUARD_STAND'
 }
 
 -- ---------------------------------------------------------------------
