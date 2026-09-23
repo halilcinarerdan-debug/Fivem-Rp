@@ -103,6 +103,30 @@ function Matrix.FormatMilSimStatus(value, trueText, falseText)
     return falseText or '🟢 PASİF'
 end
 
+-- ★ [OYUNCU RAPORU] "Bota para/eşya veriyorum ama envanterinde
+-- görünmüyor, 'bot envanteri dolu' diyor." Kök neden: matrix_trap_stash_*,
+-- vehicle_trunk_* ve matrix_gang_hood_stash_* gibi HER özel envanter
+-- kimliği kullanılmadan önce exports.ox_inventory:RegisterStash ile
+-- açıkça kayıt edilir (bkz. server/main.lua DepositDealerCargoToTrapStash,
+-- server/logistics.lua, server/gang_hoods.lua) -- AMA botların KENDİ
+-- kişisel 'dealer_<botId>' envanteri hiçbir yerde ASLA kayıt edilmemişti.
+-- Kayıtsız bir kimlikte ox_inventory:AddItem, envanteri "0 slot/0kg" gibi
+-- davranıp HER ekleme girişimini "dolu" diye reddeder -- oyuncunun
+-- bildirdiği "1 birimlik bir eşya bile sığmıyor" tam olarak budur.
+function Matrix.EnsureBotInventoryRegistered(botId, label)
+    local ok = pcall(function()
+        exports['ox_inventory']:RegisterStash(
+            ('dealer_%d'):format(botId),
+            label or ('Ajan #%d Envanteri'):format(botId),
+            41, 120000
+        )
+    end)
+    if not ok then
+        Matrix.Log('CORE', '[HATA] Bot #%d envanteri kayit edilemedi (RegisterStash basarisiz).', botId)
+    end
+    return ok
+end
+
 function Matrix.Inventory.GetSlotMetadata(inventoryId, slot)
     if not inventoryId or not slot then return {} end
     local ok, item = pcall(exports['ox_inventory'].GetSlot, exports['ox_inventory'], inventoryId, slot)
@@ -300,6 +324,7 @@ function Matrix.CreateBotRecord(profile)
 
     Matrix.Bots[id] = bot
     Matrix.MarkBotDirty(id)
+    Matrix.EnsureBotInventoryRegistered(id, bot.name)
     Matrix.Log('CORE', 'Bot #%d matrise yazildi: %s (%s)', id, bot.name, bot.role)
     return bot
 end
@@ -493,6 +518,7 @@ local function LoadBotsFromDatabase()
             }
         }
         if row.id >= Matrix.NextBotId then Matrix.NextBotId = row.id + 1 end
+        Matrix.EnsureBotInventoryRegistered(row.id, row.name)
     end
     Matrix.Log('CORE', '%d bot matristen belleğe yüklendi.', #rows)
 end

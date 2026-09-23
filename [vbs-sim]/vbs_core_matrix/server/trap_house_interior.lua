@@ -373,6 +373,14 @@ RegisterNetEvent('matrix:server:trapHouseInterior:giveItemToBot', function(botId
         return
     end
 
+    -- ★ [DUZELTME] server/main.lua'nin Matrix.EnsureBotInventoryRegistered'i
+    -- normalde bot olusturulurken/yuklenirken zaten cagirir -- burada
+    -- TEKRAR cagirmak zararsizdir (idempotent, trap house stash'in HER
+    -- teslimat oncesi yeniden kaydedilmesiyle AYNI savunma deseni) ve
+    -- bu fix'ten ONCE olusturulmus botlar icin de kalici bir kurtarma saglar.
+    if Matrix.EnsureBotInventoryRegistered then
+        Matrix.EnsureBotInventoryRegistered(botId, Matrix.Bots[botId].name)
+    end
 
     local okSlot, slotData = pcall(function()
         return exports['ox_inventory']:GetSlot(src, playerSlot)
@@ -443,6 +451,11 @@ RegisterNetEvent('matrix:server:trapHouseInterior:transferBotToBot', function(fr
         or type(itemName) ~= 'string' or count < 1 then
         Reply(src, 'Gecersiz aktarim parametreleri.')
         return
+    end
+
+    if Matrix.EnsureBotInventoryRegistered then
+        Matrix.EnsureBotInventoryRegistered(fromBotId, Matrix.Bots[fromBotId].name)
+        Matrix.EnsureBotInventoryRegistered(toBotId, Matrix.Bots[toBotId].name)
     end
 
 
