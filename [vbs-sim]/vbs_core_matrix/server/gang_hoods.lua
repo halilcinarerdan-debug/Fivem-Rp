@@ -192,6 +192,137 @@ end
 
 
 -- =====================================================================
+-- ★★★ OPENAI DÜŞMAN ÇETE ALDATMA (DARKCHAT DEZENFORMASYON KÖPRÜSÜ) ★★★
+-- Oyuncu darkchat üzerinden bir dezenformasyon/aldatma metni gönderir.
+-- Metin ÖNCE deterministik bir anahtar-kelime skoruna tabi tutulur
+-- (Config.GangHoods.Deception.BaseCredibilityKeywords) -- bu HER ZAMAN
+-- çalışır, RNG YOK. Config.AI_Matrix_Brain (server-only, server/
+-- config_secrets.lua) etkinse AYRICA OpenAI'a sorulur ve döndürdüğü
+-- [0,1] skor VARSA onun yerine kullanılır -- ama Büro'nun/mahallenin
+-- devriye kararı ASLA bu ağ isteğini BEKLEMEZ (fire-and-forget, mevcut
+-- Config.AI_Matrix_Brain felsefesiyle AYNI: "fallbackToDeterministic").
+-- Başarılı aldatma, mahallenin PatrolMultiplier'ını (mevcut ALPR devriye
+-- yoğunlaşma çarpanı, KATMAN 7) ÜSSEL olarak düşürür -- yalnızca aktif
+-- bir yağma penceresi VARKEN anlamlıdır (aksi halde zaten 1.0 tabandır).
+-- =====================================================================
+local DeceptionCooldown = {} -- [src#hoodId] = sonraki izinli epoch
+
+
+local function ComputeBaseCredibility(message)
+    local cfg = Config.GangHoods.Deception
+    local keywords = (cfg and cfg.BaseCredibilityKeywords) or {}
+    if #keywords == 0 then return 0.0 end
+
+    local lower = message:lower()
+    local hits = 0
+    for _, kw in ipairs(keywords) do
+        if lower:find(kw, 1, true) then hits = hits + 1 end
+    end
+    return Matrix.Clamp(hits / #keywords, 0.0, 1.0)
+end
+
+
+--- AI skorunu asenkron çeker; başarısız/kapalıysa callback(nil) ile
+--- HEMEN döner -- çağıran ASLA bloklanmaz. json/PerformHttpRequest
+--- server/bureau.lua RunAIAdvisoryPass İLE AYNI güvenli çağrı deseni.
+local function RequestAICredibilityScore(message, callback)
+    local ai = Config.AI_Matrix_Brain
+    if not (ai and ai.enabled and ai.provider == 'openai' and ai.apiKey and ai.apiKey ~= 'sk-...') then
+        callback(nil)
+        return
+    end
+
+    local body = json.encode({
+        model = 'gpt-4o-mini',
+        messages = {
+            {
+                role = 'system',
+                content = 'You are rating how CONVINCING a piece of criminal disinformation is, for a fictional GTA roleplay server simulation. Reply with ONLY a single number between 0 and 1, nothing else.'
+            },
+            { role = 'user', content = tostring(message) }
+        }
+    })
+
+    local ok = pcall(function()
+        PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
+            if statusCode ~= 200 then callback(nil); return end
+            local decOk, decoded = pcall(json.decode, response)
+            if not decOk or type(decoded) ~= 'table' or not decoded.choices or not decoded.choices[1] then
+                callback(nil); return
+            end
+            local content = decoded.choices[1].message and decoded.choices[1].message.content
+            local score = tonumber(tostring(content or ''):match('%d+%.?%d*'))
+            if not score then callback(nil); return end
+            callback(Matrix.Clamp(score, 0.0, 1.0))
+        end, 'POST', body, {
+            ['Content-Type']  = 'application/json',
+            ['Authorization'] = 'Bearer ' .. tostring(ai.apiKey)
+        })
+    end)
+    if not ok then callback(nil) end
+end
+
+
+RegisterNetEvent('matrix:server:gangHood:sendDisinformation', function(hoodId, message)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+
+    local cfg = Config.GangHoods.Deception
+    if not (cfg and cfg.Enabled) then return end
+
+    hoodId = tonumber(hoodId)
+    local hood = hoodId and Matrix.GangHoods.Hoods[hoodId]
+    if not hood then return end
+
+    if type(message) ~= 'string' or message == '' or #message > (cfg.MessageMaxLength or 280) then
+        TriggerClientEvent('matrix:client:actionNotify', src, false, 'Gecersiz veya cok uzun mesaj.')
+        return
+    end
+
+    local cooldownKey = ('%d#%d'):format(src, hoodId)
+    local now = Matrix.Now()
+    if DeceptionCooldown[cooldownKey] and now < DeceptionCooldown[cooldownKey] then
+        TriggerClientEvent('matrix:client:actionNotify', src, false, 'Bu mahalleye cok sik dezenformasyon gonderiyorsunuz.')
+        return
+    end
+    DeceptionCooldown[cooldownKey] = now + (cfg.CooldownSeconds or 120)
+
+    local baseScore = ComputeBaseCredibility(message)
+
+    RequestAICredibilityScore(message, function(aiScore)
+        local finalScore = aiScore or baseScore
+        local threshold  = cfg.BaseCredibilityThreshold or 0.34
+
+        if finalScore < threshold then
+            TriggerClientEvent('matrix:client:actionNotify', src, false, 'Aldatma ikna edici bulunmadi.')
+            Matrix.Log('GANGHOODS', '[DECEPTION][RED] src=%d hood=#%d skor=%.3f(ai=%s) esik=%.3f',
+                src, hoodId, finalScore, tostring(aiScore ~= nil), threshold)
+            return
+        end
+
+        local current = PatrolMultiplier[hoodId]
+        if not current then
+            TriggerClientEvent('matrix:client:actionNotify', src, false,
+                'Ikna edici oldu ama su an aktif bir alarm/devriye yogunlasmasi yok (yagma penceresi kapali).')
+            return
+        end
+
+        local decayRate  = cfg.AggressionDecayRate or 0.6
+        local decayFactor = math.exp(-decayRate * (finalScore - threshold) * 10.0)
+        local newMult = math.max(cfg.MinAggressionMultiplier or 1.0, current * decayFactor)
+        PatrolMultiplier[hoodId] = newMult
+
+        TriggerClientEvent('matrix:client:actionNotify', src, true,
+            ('[ALDATMA BASARILI] "%s" cetesi manipule edildi -- devriye yogunlugu %.2fx -> %.2fx.'):format(
+                hood.label or ('Mahalle #%d'):format(hoodId), current, newMult))
+        Matrix.Log('GANGHOODS',
+            '[DECEPTION][BASARILI] src=%d hood=#%d skor=%.3f(ai=%s) PatrolMultiplier %.3f -> %.3f',
+            src, hoodId, finalScore, tostring(aiScore ~= nil), current, newMult)
+    end)
+end)
+
+
+-- =====================================================================
 -- /depoyuyak — kalan yağmayı kalıcı olarak yok et ve sahneden TÜM adli
 -- kanıtı (matrix_forensic_evidence) sil -- front company'i audit-wipe
 -- riskinden korur (ZATEN VAR OLAN /namludegistir'in "kanıt asla silinmez"
@@ -269,7 +400,20 @@ TagLootedWeaponMetadata = function(stashId, itemName, count, meta)
 end
 
 
+-- ★ [SEC][YETKI KAPISI EKLENDI] Bu komut, sonunda /davaac + /davasorgula
+-- ile AYNI Matrix.Bureau.ExecuteVerdict zincirine dogrudan bagliyor ama
+-- HICBIR yetki kontrolu tasimiyordu -- proximity + frame-up etiketi
+-- yeterliydi, yani HERHANGI bir sivil oyuncu bir rakibe suc silahi
+-- yerlestirip onu ANINDA %100 mahkum edebiliyordu, polis/Buro hic
+-- devrede olmadan. /davaac ile AYNI Matrix.IsOnDutyPolice kapisi eklendi.
 RegisterCommand('kanityukle', function(src, args)
+    if not Matrix.IsOnDutyPolice(src) then
+        Reply(src, 'Yetkisiz: kanit yuklemek icin gorevde polis/serif olmaniz gerekir.')
+        if Matrix.Security and Matrix.Security.LogTamperAttempt then
+            Matrix.Security.LogTamperAttempt(src, 'kanityukle', args)
+        end
+        return
+    end
     local suspectSrc = tonumber(args[1])
     local slot        = tonumber(args[2])
     if not suspectSrc or not slot then

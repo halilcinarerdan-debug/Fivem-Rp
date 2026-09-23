@@ -185,8 +185,31 @@ CREATE TABLE IF NOT EXISTS `matrix_forensic_evidence` (
     `created_at`              DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (`id`),
     KEY `idx_matrix_forensic_evidence_ballistic_id` (`ballistic_id`),
+    -- ★ [Table Scan koruması] server/forensics.lua TickEvidenceDecayHourly
+    -- (UPDATE) ve PurgeDecayedEvidence (DELETE) HER SAAT bu üç kolonu
+    -- filtreler (WHERE sealed_as_crime_weapon = 0 AND striation_quality < ?
+    -- AND fingerprint_quality < ?) -- bu kompozit INDEX olmadan her tik
+    -- FULL TABLE SCAN'dir.
+    KEY `idx_matrix_forensic_evidence_decay` (`sealed_as_crime_weapon`, `striation_quality`, `fingerprint_quality`),
     CONSTRAINT `fk_matrix_forensic_evidence_ballistic`
         FOREIGN KEY (`ballistic_id`) REFERENCES `matrix_ballistic_weapons` (`ballistic_id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ---------------------------------------------------------------------
+-- Kapı Kırma (breaching_tool) Adli İzi -- matrix_forensic_evidence'tan
+-- AYRI tutulur çünkü o tablonun ballistic_id FK'si NOT NULL'dır ve bir
+-- kırma olayının balistik kaydı yoktur.
+-- ---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `matrix_breach_forensics` (
+    `id`                INT          NOT NULL AUTO_INCREMENT,
+    `trap_house_id`     INT          NOT NULL,
+    `tool_item`         VARCHAR(64)  NOT NULL,
+    `fingerprint_id`    VARCHAR(64)  NOT NULL,
+    `tool_mark_quality` FLOAT        NOT NULL DEFAULT 1.0,
+    `created_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_breach_forensics_trap` (`trap_house_id`),
+    KEY `idx_matrix_breach_forensics_fingerprint` (`fingerprint_id`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 
@@ -1383,6 +1406,115 @@ CREATE TABLE IF NOT EXISTS `matrix_crypto_wallets` (
     KEY `idx_matrix_crypto_wallets_holder` (`holder_type`, `holder_identifier`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
+-- =======================================================================
+-- ★★★ [SEC-6 v2] TEK ATOMİK SAKLI YORDAM — CRYPTO CAS SERIALIZATION ★★★
+-- server/bureau.lua Matrix.Bureau.ProcessBribeCryptoTransaction (v2), bu
+-- prosedürü `CALL sp_matrix_process_bribe_crypto_transaction(?,?,?)` ile
+-- TEK bir round-trip'te çağırır.
+--
+-- NEDEN GEREKLİ: oxmysql'in her `.await()` çağrısı havuzdan (pool)
+-- BAĞIMSIZ bir bağlantı alabilir. Önceki (v1) akışta `SELECT ... FOR
+-- UPDATE` ve ardından gelen `UPDATE` AYRI iki round-trip'ti; aralarında
+-- açık bir transaction OLMADIĞI için (autocommit), InnoDB satır kilidi
+-- ilk ifade biter bitmez fiilen serbest kalabiliyordu ("havada kalan
+-- kilit"). Bu prosedür SELECT...FOR UPDATE + doğrulama + UPDATE'i AYNI
+-- bağlantı, AYNI transaction (START TRANSACTION ... COMMIT/ROLLBACK)
+-- içinde çalıştırarak bu sızıntı penceresini KÖKTEN kapatır.
+--
+-- KURULUM: Bu dosya `mysql -u <user> -p <db> < matrix_financial_core.sql`
+-- ile İÇE AKTARILDIĞINDA (veya phpMyAdmin "Import" ile) DELIMITER
+-- direktifi istemci tarafından yorumlanır -- ekstra bir adım GEREKMEZ.
+-- Yalnızca ham bir SQL string olarak (ör. bir ORM migration runner'ı
+-- `;` üzerinden bölüyorsa) çalıştırıyorsanız bu bloğu AYRI ve `DELIMITER`
+-- destekleyen bir istemciyle (mysql CLI, HeidiSQL, phpMyAdmin, DBeaver)
+-- uygulayın.
+-- =======================================================================
+
+DELIMITER $$
+
+DROP PROCEDURE IF EXISTS `sp_matrix_process_bribe_crypto_transaction`$$
+
+CREATE PROCEDURE `sp_matrix_process_bribe_crypto_transaction` (
+    IN  p_wallet_address    VARCHAR(64),
+    IN  p_amount            DECIMAL(16,4),
+    IN  p_target_identifier VARCHAR(50)
+)
+BEGIN
+    DECLARE v_holder_identifier VARCHAR(50)   DEFAULT NULL;
+    DECLARE v_holder_type       VARCHAR(16)   DEFAULT NULL;
+    DECLARE v_balance           DECIMAL(16,4) DEFAULT 0.0000;
+    DECLARE v_old_key           VARCHAR(64)   DEFAULT NULL;
+    DECLARE v_tx_sequence       INT           DEFAULT 0;
+    DECLARE v_new_key           VARCHAR(64)   DEFAULT NULL;
+    DECLARE v_new_balance       DECIMAL(16,4) DEFAULT 0.0000;
+    DECLARE v_new_sequence      INT           DEFAULT 0;
+    DECLARE v_affected          INT           DEFAULT 0;
+    DECLARE v_not_found         TINYINT       DEFAULT 0;
+
+    -- Beklenmeyen bir SQL hatası -> ROLLBACK + fail-closed sonuç satırı.
+    -- Bakiye ASLA belirsiz/yarım bir durumda bırakılmaz.
+    DECLARE EXIT HANDLER FOR SQLEXCEPTION
+    BEGIN
+        ROLLBACK;
+        SELECT 'sql_exception' AS result_code, 0.0000 AS new_balance, 0 AS new_tx_sequence, NULL AS holder_identifier;
+    END;
+
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_not_found = 1;
+
+    START TRANSACTION;
+
+    SELECT holder_identifier, holder_type, crypto_balance, rolling_cipher_key, tx_sequence
+        INTO v_holder_identifier, v_holder_type, v_balance, v_old_key, v_tx_sequence
+        FROM matrix_crypto_wallets
+        WHERE wallet_address = p_wallet_address
+        FOR UPDATE;
+
+    IF v_not_found = 1 THEN
+        ROLLBACK;
+        SELECT 'wallet_not_found' AS result_code, 0.0000 AS new_balance, 0 AS new_tx_sequence, NULL AS holder_identifier;
+
+    ELSEIF v_holder_identifier <> p_target_identifier THEN
+        -- ★ KURBAN KORUMASI: caller'ın hedefi DEĞİL, DB'den okunan LEGIT
+        -- holder Lua tarafına döner (server/bureau.lua orada burn+raid uygular).
+        ROLLBACK;
+        SELECT 'context_drift' AS result_code, v_balance AS new_balance, v_tx_sequence AS new_tx_sequence, v_holder_identifier AS holder_identifier;
+
+    ELSEIF v_balance < p_amount THEN
+        ROLLBACK;
+        SELECT 'insufficient_balance' AS result_code, v_balance AS new_balance, v_tx_sequence AS new_tx_sequence, v_holder_identifier AS holder_identifier;
+
+    ELSE
+        SET v_new_sequence = v_tx_sequence + 1;
+        -- Deterministik cipher mutasyonu (math.random YOK): SHA2 gerçek
+        -- kriptografik hash -- Lua tarafındaki `_CryptoSha256Like` toy
+        -- checksum'ından DAHA GÜÇLÜ, aynı 64-hex-karakter formatına sığar.
+        SET v_new_key     = SHA2(CONCAT(v_old_key, '#', p_amount, '#', v_holder_identifier, '#', v_new_sequence), 256);
+        SET v_new_balance = v_balance - p_amount;
+
+        UPDATE matrix_crypto_wallets
+            SET crypto_balance = v_new_balance,
+                rolling_cipher_key = v_new_key,
+                tx_sequence = v_new_sequence,
+                updated_at = NOW()
+            WHERE wallet_address = p_wallet_address
+              AND rolling_cipher_key = v_old_key;
+
+        SET v_affected = ROW_COUNT();
+
+        IF v_affected = 1 THEN
+            COMMIT;
+            SELECT 'ok' AS result_code, v_new_balance AS new_balance, v_new_sequence AS new_tx_sequence, v_holder_identifier AS holder_identifier;
+        ELSE
+            -- CAS başarısız (aynı transaction İÇİNDE bile beklenmez, ama
+            -- belt-and-suspenders): fail-closed, ROLLBACK.
+            ROLLBACK;
+            SELECT 'cipher_drift' AS result_code, v_balance AS new_balance, v_tx_sequence AS new_tx_sequence, v_holder_identifier AS holder_identifier;
+        END IF;
+    END IF;
+END$$
+
+DELIMITER ;
+
 SET FOREIGN_KEY_CHECKS = 1;
 
 
@@ -1447,6 +1579,28 @@ CREATE TABLE IF NOT EXISTS `matrix_opsec_tamper_log` (
     KEY `idx_matrix_opsec_tamper_citizen` (`citizenid`),
     CONSTRAINT `fk_matrix_opsec_tamper_trap`
         FOREIGN KEY (`trap_house_id`) REFERENCES `matrix_trap_houses` (`id`)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
+
+-- ★ [SANDBOX ACE HARDENING] Genel amaçlı komut-tamper adli kaydı --
+-- server/main.lua Matrix.Security.LogTamperAttempt tarafından, group.admin/
+-- command.matrix_supervisor ACE'ına sahip OLMAYAN bir kaynak tehlikeli/
+-- debug bir komutu (Matrix.Security.DangerousCommands) tetiklemeye
+-- çalıştığında yazılır. Yukarıdaki matrix_opsec_tamper_log İLE
+-- KARIŞTIRILMAZ -- o tablo trap_house_id NOT NULL + FK ile YALNIZCA
+-- yanlış OPSEC parolası denemelerine özeldir; bu tablonun şeması genel
+-- bir komut adı + serbest JSON argüman listesi taşır, hiçbir FK'ye bağlı
+-- DEĞİLDİR (bir trap house'a özel olmayan komutlar da -- ör. /botyarat --
+-- buraya düşer).
+CREATE TABLE IF NOT EXISTS `matrix_command_tamper_log` (
+    `id`           INT          NOT NULL AUTO_INCREMENT,
+    `src`          INT          NOT NULL,
+    `citizenid`    VARCHAR(50)  NULL,
+    `command_name` VARCHAR(64)  NOT NULL,
+    `raw_args`     TEXT         NULL,
+    `created_at`   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (`id`),
+    KEY `idx_matrix_command_tamper_citizen` (`citizenid`),
+    KEY `idx_matrix_command_tamper_command` (`command_name`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

@@ -38,6 +38,7 @@ local SetEntityCoords               = SetEntityCoords
 local TriggerClientEvent            = TriggerClientEvent
 local RegisterCommand               = RegisterCommand
 local RegisterNetEvent              = RegisterNetEvent
+local GetVehicles                   = GetVehicles
 
 
 local PENDING_EVENTS_MAX = 64
@@ -920,7 +921,14 @@ end
 -- =====================================================================
 -- ÇATIŞMA DİRENCİ
 -- =====================================================================
-function Matrix.Logistics.ApplyCombatDamage(botId, rawDamage)
+--- ★ SİVİL MUHBİR ENTEGRASYONU: attackerSrc VERİLİRSE (gerçek bir oyuncu
+--- tetiklediyse) ve bot ELENİRSE, server/bureau.lua Matrix.Bureau.
+--- WitnessBotElimination'ı (pcall'lı -- bureau.lua yüklenmemiş olsa bile
+--- bu fonksiyon ÇÖKMEZ) botun SON BİLİNEN GERÇEK konumuyla çağırır.
+--- attackerSrc OPSİYONELDİR: hitsquad/raid gibi mevcut iç çağrı yolları
+--- (belirli bir insan saldırgan olmayan) bunu HİÇ GEÇMEZ, davranış AYNEN
+--- korunur.
+function Matrix.Logistics.ApplyCombatDamage(botId, rawDamage, attackerSrc)
     local bot = Matrix.Bots[botId]
     if not bot then return false end
 
@@ -934,6 +942,16 @@ function Matrix.Logistics.ApplyCombatDamage(botId, rawDamage)
     local effectiveDamage = rawDamage * (1.0 - profile.CombatResistance)
 
 
+    local function _WitnessIfEliminated()
+        if type(attackerSrc) ~= 'number' or attackerSrc <= 0 then return end
+        if not (Matrix.Bureau and Matrix.Bureau.WitnessBotElimination) then return end
+        local coords = (dispatch and (dispatch.last_coords or dispatch.origin)) or bot.state.coords
+        if coords then
+            pcall(Matrix.Bureau.WitnessBotElimination, attackerSrc, botId, coords)
+        end
+    end
+
+
     if dispatch then
         dispatch.combat_damage = (dispatch.combat_damage or 0.0) + effectiveDamage
         Matrix.Log('LOGISTICS', 'Bot #%d catisma hasari: ham=%.2f direnc=%.2f etkin=%.2f birikim=%.2f/%.2f',
@@ -942,9 +960,11 @@ function Matrix.Logistics.ApplyCombatDamage(botId, rawDamage)
 
 
         if dispatch.combat_damage >= Config.Logistics.CombatEliminationThreshold then
+            _WitnessIfEliminated()
             Matrix.Logistics.OnDealerEliminated(botId, 'combat')
         end
     elseif effectiveDamage >= Config.Logistics.CombatEliminationThreshold then
+        _WitnessIfEliminated()
         Matrix.Logistics.OnDealerEliminated(botId, 'combat')
     end
 
@@ -952,10 +972,69 @@ function Matrix.Logistics.ApplyCombatDamage(botId, rawDamage)
     return true
 end
 
+--- Dış kaynaklar (ör. gerçek bir silah-atış/hit-detection scripti) için
+--- export köprüsü -- attackerSrc verilirse sivil muhbir/maske entegrasyonu
+--- (server/bureau.lua Matrix.Bureau.WitnessBotElimination) devreye girer.
+exports('ApplyCombatDamage', function(botId, rawDamage, attackerSrc)
+    return Matrix.Logistics.ApplyCombatDamage(botId, rawDamage, attackerSrc)
+end)
+
 
 function Matrix.Logistics.OnPoliceCollision(botId)
     return Matrix.Logistics.OnDealerEliminated(botId, 'police_collision')
 end
+
+
+-- =====================================================================
+-- ★ TRAFİK YOĞUNLUĞUNA BAĞLI DİNAMİK SÜRAT — Config.Traffic (shared/config.lua)
+-- Bkz. o dosyadaki yorum: GetVehicleDensityMultiplier gibi bir GETTER
+-- native'i yoktur; bunun yerine GetVehicles() ile ağdaki GERÇEK araç
+-- sayısını verilen yarıçapta sayıp deterministik (RNG'siz) bir yoğunluk
+-- oranına çeviriyoruz. pcall'lı: GetVehicles her nedense yoksa/hata
+-- verirse yoğunluk 0 kabul edilir (fail-open -- hiç yavaşlatma UYGULANMAZ,
+-- sevk asla kilitlenmez).
+-- =====================================================================
+local function ComputeNearbyVehicleCount(coords, radius)
+    if not (coords and radius and radius > 0.0) then return 0 end
+
+    local ok, vehicles = pcall(GetVehicles)
+    if not ok or type(vehicles) ~= 'table' then return 0 end
+
+    local radiusSq = radius * radius
+    local count = 0
+    for i = 1, #vehicles do
+        local veh = vehicles[i]
+        if veh and veh ~= 0 and DoesEntityExist(veh) then
+            local okCoords, vCoords = pcall(GetEntityCoords, veh)
+            if okCoords and vCoords then
+                local dx, dy, dz = vCoords.x - coords.x, vCoords.y - coords.y, vCoords.z - coords.z
+                if (dx * dx + dy * dy + dz * dz) <= radiusSq then
+                    count = count + 1
+                end
+            end
+        end
+    end
+    return count
+end
+
+--- [0,1] aralığında deterministik yoğunluk oranı — DensitySaturationCount'a
+--- ulaşıldığında/geçildiğinde 1.0'da doyar.
+local function ComputeTrafficDensityRatio(coords)
+    local count = ComputeNearbyVehicleCount(coords, Config.Traffic.SampleRadius)
+    local saturation = Config.Traffic.DensitySaturationCount
+    if not saturation or saturation <= 0 then return 0.0 end
+    return Matrix.Clamp(count / saturation, 0.0, 1.0)
+end
+
+--- Sivil/kurye (dealer, runner) sevkiyatları için: frictionDivisor'a
+--- doğrudan EKLENECEK ek katsayı. Yoğun trafik -> daha yüksek sürtünme ->
+--- daha düşük cruiseSpeed (bkz. server/main.lua BeginPhysicalDispatch:
+--- cruiseSpeed = baseSpeed / frictionDivisor).
+function Matrix.Logistics.ComputeTrafficFrictionBonus(coords)
+    return ComputeTrafficDensityRatio(coords) * Config.Traffic.CivilianTrafficFrictionMax
+end
+
+Matrix.Logistics.ComputeTrafficDensityRatio = ComputeTrafficDensityRatio
 
 
 -- =====================================================================
@@ -1065,7 +1144,8 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
     local baseSpeed   = Config.Logistics.BaseSpeedUnitsPerSecond
 
 
-    local frictionDivisor = 1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient * effectiveFriction)
+    local trafficFrictionBonus = Matrix.Logistics.ComputeTrafficFrictionBonus(origin)
+    local frictionDivisor = 1.0 + (weightTotal * Config.Logistics.WeightFrictionCoefficient * effectiveFriction) + trafficFrictionBonus
 
 
     local etaSeconds = (distance / (baseSpeed * profile.SpeedCoefficient)) * frictionDivisor
@@ -1073,11 +1153,11 @@ function Matrix.Logistics.DispatchDealer(botId, destination, vehicleRef, dispatc
 
 
     Matrix.Log('LOGISTICS',
-        'Sevkiyat plani: Bot #%d [%s]%s Mesafe:%.1fm Agirlik:%.1fg Surtunme:x%.2f ETA:%.1fsn',
+        'Sevkiyat plani: Bot #%d [%s]%s Mesafe:%.1fm Agirlik:%.1fg Surtunme:x%.2f (trafik:+%.2f) ETA:%.1fsn',
         botId, bot.name,
         plate and (' Plaka:%s VIN:%s Asinma:%.2f'):format(plate, vehicle.vin_status, vehicle.vehicle_wear)
               or (' Arac:%s'):format(vehicleType),
-        distance, weightTotal, frictionDivisor, etaSeconds)
+        distance, weightTotal, frictionDivisor, trafficFrictionBonus, etaSeconds)
 
 
     if Matrix.BeginPhysicalDispatch then
@@ -1177,12 +1257,16 @@ function Matrix.Logistics.DispatchAmmoRun(sourceBotId, targetBotId, dispatcherSr
     end
     if plate then ActiveVehicleLocks[plate] = sourceBotId end
 
-    local distance    = VectorDistance(house.coords, targetBot.state.coords)
-    local profile      = GetVehicleProfile(vehicleType)
-    local etaSeconds   = Matrix.Clamp(distance / (Config.Logistics.BaseSpeedUnitsPerSecond * profile.SpeedCoefficient), 0.0, math_huge)
+    local distance             = VectorDistance(house.coords, targetBot.state.coords)
+    local profile              = GetVehicleProfile(vehicleType)
+    local trafficFrictionBonus = Matrix.Logistics.ComputeTrafficFrictionBonus(house.coords)
+    local frictionDivisor      = 1.0 + trafficFrictionBonus
+    local etaSeconds   = Matrix.Clamp(
+        (distance / (Config.Logistics.BaseSpeedUnitsPerSecond * profile.SpeedCoefficient)) * frictionDivisor,
+        0.0, math_huge)
 
     local ok, reason = Matrix.BeginPhysicalDispatch(
-        sourceBotId, house.coords, targetBot.state.coords, plate, vehicleType, etaSeconds, dispatcherSrc, 1.0
+        sourceBotId, house.coords, targetBot.state.coords, plate, vehicleType, etaSeconds, dispatcherSrc, frictionDivisor
     )
     if not ok then
         if plate then ActiveVehicleLocks[plate] = nil end
@@ -1736,7 +1820,7 @@ RegisterCommand('aracsizdurumu', function(src, args)
 end, false)
 
 
-RegisterCommand('aracele', function(src, args)
+Matrix.Security.RegisterGatedCommand('aracele', function(src, args)
     local plate = args[1]
     local cause = args[2] or 'debug'
     if type(plate) ~= 'string' then Reply(src, 'Kullanim: /aracele [plaka] [sebep]'); return end
@@ -1744,10 +1828,10 @@ RegisterCommand('aracele', function(src, args)
 
     local ok = Matrix.Logistics.OnVehicleEncircled(plate, cause)
     Reply(src, ok and ('%s ele gecirildi ve muhurlendi.'):format(plate) or 'Arac bulunamadi.')
-end, false)
+end)
 
 
-RegisterCommand('hasarver', function(src, args)
+Matrix.Security.RegisterGatedCommand('hasarver', function(src, args)
     local botId = tonumber(args[1])
     local amount = tonumber(args[2]) or 1.0
     if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /hasarver [botId] [miktar]'); return end
@@ -1756,10 +1840,10 @@ RegisterCommand('hasarver', function(src, args)
     Matrix.Logistics.ApplyCombatDamage(botId, amount)
     local stillAlive = Matrix.Bots[botId] ~= nil
     Reply(src, ('Bot #%d hasar aldi. Hayatta:%s'):format(botId, tostring(stillAlive)))
-end, false)
+end)
 
 
-RegisterCommand('oldur', function(src, args)
+Matrix.Security.RegisterGatedCommand('oldur', function(src, args)
     local botId = tonumber(args[1])
     local cause = args[2] or 'debug'
     if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /oldur [botId] [sebep]'); return end
@@ -1767,10 +1851,10 @@ RegisterCommand('oldur', function(src, args)
 
     Matrix.Logistics.OnDealerEliminated(botId, cause)
     Reply(src, ('Bot #%d kalici olarak elendi.'):format(botId))
-end, false)
+end)
 
 
-RegisterCommand('guvengoster', function(src, args)
+Matrix.Security.RegisterGatedCommand('guvengoster', function(src, args)
     local citizenid = args[1]
     local supplierId = tonumber(args[2])
     if type(citizenid) ~= 'string' or not supplierId then
@@ -1782,10 +1866,10 @@ RegisterCommand('guvengoster', function(src, args)
     local mult = Matrix.Supplier.GetPriceMultiplier(citizenid, supplierId)
     Reply(src, ('%s <-> Toptanci #%d | Guven:%.3f | Fiyat-Carpani:x%.2f | Tedarik-Kesik:%s'):format(
         citizenid, supplierId, trust, mult, tostring(trust < Config.Supplier.SupplyCutTrustThreshold)))
-end, false)
+end)
 
 
-RegisterCommand('gecodeme', function(src, args)
+Matrix.Security.RegisterGatedCommand('gecodeme', function(src, args)
     local citizenid = args[1]
     local supplierId = tonumber(args[2])
     if type(citizenid) ~= 'string' or not supplierId then
@@ -1795,10 +1879,10 @@ RegisterCommand('gecodeme', function(src, args)
 
     local newTrust = Matrix.Supplier.ReportLatePayment(citizenid, supplierId)
     Reply(src, ('Gecikmis odeme islendi. Yeni guven:%.3f'):format(newTrust))
-end, false)
+end)
 
 
-RegisterCommand('dropdurum', function(src)
+Matrix.Security.RegisterGatedCommand('dropdurum', function(src)
     local count = 0
     local now = Matrix.Now()
     for dropId, drop in pairs(ActiveDrops) do
@@ -1809,7 +1893,7 @@ RegisterCommand('dropdurum', function(src)
             math_max(drop.expires_at - now, 0), DropHeat[dropId] or 0.0))
     end
     Reply(src, ('--- Toplam %d acik drop ---'):format(count))
-end, false)
+end)
 
 
 local function ParseCoordNumber(s)

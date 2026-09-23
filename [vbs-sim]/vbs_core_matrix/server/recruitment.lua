@@ -445,7 +445,7 @@ local function Reply(src, msg)
 end
 
 
-RegisterCommand('sorgu', function(src, args)
+Matrix.Security.RegisterGatedCommand('sorgu', function(src, args)
     local id = tonumber(args[1])
     local kind = (args[2] == 'bot') and 'bot' or 'candidate'
 
@@ -465,7 +465,7 @@ RegisterCommand('sorgu', function(src, args)
     if result then
         Reply(src, ('Sorgu #%d | Panik: %s | Sonuç: %s'):format(sid, result.waveform, result.outcome))
     end
-end, false)
+end)
 
 
 -- =====================================================================
@@ -481,7 +481,7 @@ end, false)
 -- [odemeBasarisiz] [kimyaIpucu] [bagimlilik] - matrix_customer_pool'a
 -- gerçek oynanış beklemeden bir satır yazar; ardından /havuztara ile
 -- DeriveTraitsFromCustomer formülünün ürettiği trait'ler gözlemlenebilir.
-RegisterCommand('musterikaydet', function(src, args)
+Matrix.Security.RegisterGatedCommand('musterikaydet', function(src, args)
     local citizenid = args[1]
     local name       = args[2] or citizenid
     if type(citizenid) ~= 'string' then
@@ -508,18 +508,18 @@ RegisterCommand('musterikaydet', function(src, args)
 
 
     Reply(src, ('Müşteri havuzu satırı yazıldı: %s (%s)'):format(citizenid, name))
-end, false)
+end)
 
 
 -- /havuztara - ScanCustomerPool'u 300sn beklemeden anlık çalıştırır.
-RegisterCommand('havuztara', function(src)
+Matrix.Security.RegisterGatedCommand('havuztara', function(src)
     local count = Matrix.Recruitment.ScanCustomerPool()
     Reply(src, ('Havuz tarandı: %d aday terfi etti.'):format(count or 0))
-end, false)
+end)
 
 
 -- /adaygoster [candidateId] - bir adayın anlık psychology/addiction durumunu döker.
-RegisterCommand('adaygoster', function(src, args)
+Matrix.Security.RegisterGatedCommand('adaygoster', function(src, args)
     local id = tonumber(args[1])
     local candidate = id and Matrix.Candidates[id]
     if not candidate then Reply(src, 'Kullanim: /adaygoster [candidateId]'); return end
@@ -529,12 +529,12 @@ RegisterCommand('adaygoster', function(src, args)
     Reply(src, ('Aday #%d %s | Fear:%.2f Res:%.2f Snitch:%.2f Econ:%.2f Cog:%.2f Chem:%.2f | Bağımlılık:%.1f'):format(
         id, candidate.name, p.fear_factor, p.resilience, p.snitch_tendency, p.economic_pressure,
         p.cognitive_shifter, p.skill_chemistry, candidate.addiction_level))
-end, false)
+end)
 
 
 -- /baskiuygula [sessionId] [miktar] - ApplyPressure'ı /sorgu'nun sabit 25.0
 -- değeri dışında serbest bir miktarla test etmek için.
-RegisterCommand('baskiuygula', function(src, args)
+Matrix.Security.RegisterGatedCommand('baskiuygula', function(src, args)
     local sid = tonumber(args[1])
     local amount = tonumber(args[2])
     if not sid or not amount then Reply(src, 'Kullanim: /baskiuygula [sessionId] [miktar]'); return end
@@ -545,30 +545,30 @@ RegisterCommand('baskiuygula', function(src, args)
 
 
     Reply(src, ('Panik: %s (%.3f) | Sonuç: %s'):format(result.waveform, result.panic_index, result.outcome))
-end, false)
+end)
 
 
 -- /sorgubitir [sessionId] - EvaluateOutcome wrapper'ı.
-RegisterCommand('sorgubitir', function(src, args)
+Matrix.Security.RegisterGatedCommand('sorgubitir', function(src, args)
     local sid = tonumber(args[1])
     if not sid then Reply(src, 'Kullanim: /sorgubitir [sessionId]'); return end
 
 
     local outcome = Matrix.Recruitment.EvaluateOutcome(sid)
     Reply(src, outcome and ('Sonuç: %s'):format(outcome) or 'Sorgu bulunamadı.')
-end, false)
+end)
 
 
 -- /sokakdevsir [trapHouseId] [isim] - RecruitStreetNpc'yi market.lua'nın
 -- bağımlılık eşiğini beklemeden test etmek için (bkz. /havuztara İLE AYNI
 -- disiplin/kapsam: gerçek tetikleyici server/market.lua'dadır). loyalty_base
 -- 1.0 sabit -- test yolu, gerçek Ox_Target tetiğiyle AYNI sonucu üretmeli.
-RegisterCommand('sokakdevsir', function(src, args)
+Matrix.Security.RegisterGatedCommand('sokakdevsir', function(src, args)
     local trapHouseId = tonumber(args[1])
     local label = args[2] or 'Test-Ajan'
     local bot = Matrix.Recruitment.RecruitStreetNpc(label, trapHouseId, 1.0)
     Reply(src, ('"%s" devsirildi -> Bot #%d (loyalty_base=%.2f).'):format(label, bot.id, bot.psychology.loyalty_base))
-end, false)
+end)
 
 
 exports('RecruitStreetNpc', function(npcLabel, trapHouseId, loyaltyBase) return Matrix.Recruitment.RecruitStreetNpc(npcLabel, trapHouseId, loyaltyBase) end)

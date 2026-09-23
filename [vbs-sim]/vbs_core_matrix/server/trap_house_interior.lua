@@ -373,6 +373,14 @@ RegisterNetEvent('matrix:server:trapHouseInterior:giveItemToBot', function(botId
         return
     end
 
+    -- ★ [DUZELTME] server/main.lua'nin Matrix.EnsureBotInventoryRegistered'i
+    -- normalde bot olusturulurken/yuklenirken zaten cagirir -- burada
+    -- TEKRAR cagirmak zararsizdir (idempotent, trap house stash'in HER
+    -- teslimat oncesi yeniden kaydedilmesiyle AYNI savunma deseni) ve
+    -- bu fix'ten ONCE olusturulmus botlar icin de kalici bir kurtarma saglar.
+    if Matrix.EnsureBotInventoryRegistered then
+        Matrix.EnsureBotInventoryRegistered(botId, Matrix.Bots[botId].name)
+    end
 
     local okSlot, slotData = pcall(function()
         return exports['ox_inventory']:GetSlot(src, playerSlot)
@@ -386,21 +394,41 @@ RegisterNetEvent('matrix:server:trapHouseInterior:giveItemToBot', function(botId
     local transferCount = math.min(count, tonumber(slotData.count) or 1)
 
 
-    local removeOk = pcall(function()
-        return exports['ox_inventory']:RemoveItem(src, slotData.name, transferCount, nil, playerSlot)
+    -- ★ [DUZELTME] pcall(fn) ilk deger olarak "hata firlatilmadi mi"
+    -- dondurur, ox_inventory'nin KENDI true/false sonucunu DEGIL. Onceki
+    -- kod yalnizca pcall'in basarisini kontrol ediyordu -- RemoveItem/
+    -- AddItem sessizce `false` donduğunde (hata FIRLATMADAN reddettiğinde,
+    -- ör. envanter agirlik limiti/slot uyumsuzlugu) bu HIC fark edilmiyor,
+    -- "basarili" sanilip devam ediliyordu. Sonuc: esya oyuncudan cekilip
+    -- bota HICBIR ZAMAN eklenmiyordu -- sessiz kayip (oyuncunun bildirdigi
+    -- "envanter bos gozukuyor ama esya envanterimden gidiyor" TAM OLARAK
+    -- budur). Artik HER IKI deger de (pcall basarisi + ox_inventory'nin
+    -- kendi donus degeri) ayri ayri kontrol edilir.
+    local removeOk, removed = pcall(function()
+        return exports['ox_inventory']:RemoveItem(src, slotData.name, transferCount, slotData.metadata, playerSlot)
     end)
-    if not removeOk then
+    if not (removeOk and removed == true) then
         Reply(src, 'Esya envanterinizden cikarilamadi.')
         return
     end
 
 
-    local addOk = pcall(function()
+    local addOk, added = pcall(function()
         return exports['ox_inventory']:AddItem(GetBotInventoryId(botId), slotData.name, transferCount, slotData.metadata)
     end)
-    if not addOk then
-        -- Bota teslim edilemedi (bot envanteri dolu olabilir) — esyayi oyuncuya iade et.
-        pcall(function() return exports['ox_inventory']:AddItem(src, slotData.name, transferCount, slotData.metadata) end)
+    if not (addOk and added == true) then
+        -- Bota teslim edilemedi (bot envanteri dolu/kayitli degil olabilir)
+        -- -- esyayi oyuncuya iade et. Iade de basarisiz olursa (cift
+        -- basarisizlik) esya kalici olarak kaybolabilir -- bu KRITIK
+        -- durum ayrica loglanir (D1-v2 IO muhuru ile AYNI disiplin).
+        local restoreOk, restored = pcall(function()
+            return exports['ox_inventory']:AddItem(src, slotData.name, transferCount, slotData.metadata)
+        end)
+        if not (restoreOk and restored == true) then
+            Matrix.Log('TRAPHOUSE',
+                '[KRITIK] giveItemToBot: src=%d esya (%s x%d) AddItem+telafi ikisi de basarisiz -- olasi kayip.',
+                src, tostring(slotData.name), transferCount)
+        end
         Reply(src, 'Bot envanteri dolu, teslimat iptal edildi ve esya size iade edildi.')
         return
     end
@@ -425,21 +453,35 @@ RegisterNetEvent('matrix:server:trapHouseInterior:transferBotToBot', function(fr
         return
     end
 
+    if Matrix.EnsureBotInventoryRegistered then
+        Matrix.EnsureBotInventoryRegistered(fromBotId, Matrix.Bots[fromBotId].name)
+        Matrix.EnsureBotInventoryRegistered(toBotId, Matrix.Bots[toBotId].name)
+    end
 
-    local removeOk = pcall(function()
+
+    -- ★ [DUZELTME] giveItemToBot ILE AYNI hata: pcall'in kendi basari
+    -- bayragi, ox_inventory'nin sessizce dondurdugu false'u MASKELIYORDU.
+    local removeOk, removed = pcall(function()
         return exports['ox_inventory']:RemoveItem(GetBotInventoryId(fromBotId), itemName, count)
     end)
-    if not removeOk then
+    if not (removeOk and removed == true) then
         Reply(src, ('Bot #%d envanterinde yeterli %s yok.'):format(fromBotId, itemName))
         return
     end
 
 
-    local addOk = pcall(function()
+    local addOk, added = pcall(function()
         return exports['ox_inventory']:AddItem(GetBotInventoryId(toBotId), itemName, count)
     end)
-    if not addOk then
-        pcall(function() return exports['ox_inventory']:AddItem(GetBotInventoryId(fromBotId), itemName, count) end)
+    if not (addOk and added == true) then
+        local restoreOk, restored = pcall(function()
+            return exports['ox_inventory']:AddItem(GetBotInventoryId(fromBotId), itemName, count)
+        end)
+        if not (restoreOk and restored == true) then
+            Matrix.Log('TRAPHOUSE',
+                '[KRITIK] transferBotToBot: Bot #%d -> Bot #%d esya (%s x%d) AddItem+telafi ikisi de basarisiz -- olasi kayip.',
+                fromBotId, toBotId, tostring(itemName), count)
+        end
         Reply(src, ('Bot #%d envanteri dolu, aktarim iptal edildi.'):format(toBotId))
         return
     end
@@ -453,7 +495,7 @@ end)
 -- =====================================================================
 -- TAKTİK DEBUG PANELİ
 -- =====================================================================
-RegisterCommand('interiordurum', function(src)
+Matrix.Security.RegisterGatedCommand('interiordurum', function(src)
     local count = 0
     for trapHouseId, set in pairs(Occupants) do
         local n = 0
@@ -474,7 +516,7 @@ RegisterCommand('interiordurum', function(src)
         Reply(src, ('Bot #%d trap house #%d deposunda (Cikis Koprusu bekliyor, ped yok)'):format(botId, trapHouseId), true)
     end
     Reply(src, ('--- Toplam %d bot depo isleminde ---'):format(stashCount), true)
-end, false)
+end)
 
 
 exports('GetTrapHouseBucket', function(trapHouseId) return Matrix.TrapHouseInterior.GetBucket(trapHouseId) end)

@@ -363,6 +363,41 @@ RegisterNetEvent('matrix:client:hudSnapshot', function(lines)
 end)
 
 
+-- =====================================================================
+-- ★★★ [ADLİ BULGU / DÜZELTME] RENDER THREAD — GERÇEKTEN HİÇ YAZILMAMIŞTI ★★★
+-- Yukarıdaki yorum "bkz. aşağıdaki RENDER THREAD" diyordu ama böyle bir
+-- thread dosyada HİÇ VAR OLMAMIŞTI: hudActive/hudLines doğru şekilde
+-- ayarlanıyor (ToggleHud, hudSnapshot) ama hiçbir yerde EKRANA ÇİZİLMİYORDU
+-- -- F6'ya basmak durumu değiştiriyordu ama görünürde HİÇBİR ŞEY
+-- OLMUYORDU ("F6 menü gözükmüyor" olarak gözlemlenen davranışın gerçek
+-- kök nedeni budur; F10 menüsünün eksik montajıyla AYNI SINIF bir
+-- eksiklik, farklı bir dosya bölümünde). hudActive=false iken thread
+-- Wait(500) ile bekler (0 ResMon), aktifken normal HUD çizim maliyeti
+-- (her frame) uygulanır -- herhangi bir FiveM HUD'unun standart maliyeti.
+-- =====================================================================
+CreateThread(function()
+    while true do
+        if hudActive then
+            local y = 0.04
+            for i = 1, #hudLines do
+                local line = hudLines[i]
+                local r, g, b, scale = COLOR_VALUE[1], COLOR_VALUE[2], COLOR_VALUE[3], 0.33
+                if line.header then
+                    r, g, b, scale = COLOR_HEADER[1], COLOR_HEADER[2], COLOR_HEADER[3], 0.38
+                elseif line.danger then
+                    r, g, b, scale = COLOR_DANGER[1], COLOR_DANGER[2], COLOR_DANGER[3], 0.33
+                end
+                DrawMonoLine(0.015, y, line.text, r, g, b, scale)
+                y = y + 0.0215
+            end
+            Wait(0)
+        else
+            Wait(500)
+        end
+    end
+end)
+
+
 RegisterCommand('hud', function()
     ToggleHud()
 end, false)
@@ -856,6 +891,7 @@ local OpenAssignInspectorDialog -- ileri bildirim (OpenBotActionsMenu tarafında
 local OpenBotInventoryOpsMenu   -- ★ KATMAN 6: ileri bildirim
 local OpenGiveItemToBotDialog   -- ★ KATMAN 6: ileri bildirim
 local OpenAmmoRunDialog         -- ★ KATMAN 7 [T2]: ileri bildirim
+local OpenBotActionsMenu        -- ★ [F10 FAIL-SAFE] ileri bildirim (Canli Kadro tarafindan kullanilir)
 
 -- [FAZ 1] Darkchat parola sonucu
 RegisterNetEvent('matrix:client:darkchat:passphraseResult', function(ok, reason, trapHouseId)
@@ -895,4 +931,335 @@ end)
 
 -- [FAZ 4] Panik butonu tetikleyici (herhangi bir client tetikleyicisi:
 -- örn. telefon UI'nin bir butonu bu event'i çağırır):
+RegisterNetEvent('matrix:client:darkchat:triggerRemoteWipe', function(dnaIdHint)
+    TriggerServerEvent('matrix:server:phone:remoteWipe', dnaIdHint)
+end)
+
+-- Dış NUI/telefon kaynaklarının (varsa) doğrudan çağırabilmesi için export
+-- köprüsü — server zaten spoofing korumalı (yalnızca çağıranın KENDİ
+-- dna_id'si hedeflenir), bu yüzden burada EKSTRA bir doğrulama GEREKMEZ.
+exports('TriggerDarkchatRemoteWipe', function(dnaIdHint)
+    TriggerServerEvent('matrix:server:phone:remoteWipe', dnaIdHint)
+end)
+
+
+-- =====================================================================
+-- ★★★ [D1-v2 / F10 FAIL-SAFE] TAKTİK KOMUTA MENÜSÜ — NİHAİ MONTAJ ★★★
+--
+-- ADLİ BULGU: Bu dosya önceki sürümde TAM OLARAK BURADA (bir yorumun
+-- ortasında) yarım kesilmişti. Yukarıda "ileri bildirim" (forward
+-- declaration) olarak tanımlanan OpenAssignInspectorDialog,
+-- OpenBotInventoryOpsMenu, OpenGiveItemToBotDialog ve OpenAmmoRunDialog
+-- HİÇBİR YERDE gövdelendirilmemiş; OpenBotActionsMenu hiç var olmamış;
+-- ve F10 tuşuna hiçbir RegisterKeyMapping/RegisterCommand/lib.registerContext
+-- bağlanmamıştı. Sonuç: F10 sessizce HİÇBİR ŞEY AÇMIYORDU — "render
+-- blokajı" olarak gözlemlenen davranışın gerçek kök nedeni budur (dış bir
+-- qb-phone/qbx_apartments bağımlılığı bu repoda hiç mevcut değil; bu resource
+-- yalnızca pcall-korumalı, opsiyonel TriggerEvent/exports çağrılarıyla dış
+-- telefon kaynaklarına değinir — bkz. server/phone_bridge.lua).
+--
+-- ★ FAIL-SAFE KURALI: Aşağıdaki HİÇBİR external çağrı (lib.callback.await,
+-- ExecuteCommand, TriggerServerEvent) menü kapanışını/render thread'ini
+-- BLOKE EDEMEZ. Sunucudan yanıt gelmez veya bir dış bağımlılık pcall
+-- içinde hata fırlatırsa yalnızca bir lib.notify hata bildirimi basılır;
+-- F6 (HUD) ve F10 (bu menü) tuşları HER ZAMAN yeniden kullanılabilir kalır.
+-- =====================================================================
+
+--- pcall korumalı lib.callback.await sarmalayıcısı. Zaman aşımı/hata
+--- durumunda menüyü DONDURMAK yerine fallback değeri döner ve kullanıcıya
+--- görünür bir uyarı basar.
+local function SafeAwaitCallback(name, fallback, ...)
+    local ok, result = pcall(function(...) return lib.callback.await(name, false, ...) end, ...)
+    if not ok or result == nil then
+        if lib and lib.notify then
+            lib.notify({
+                title       = '[MATRIX]',
+                description = 'Sunucudan yanit alinamadi (bagimlilik hatasi) -- islem iptal edildi.',
+                type        = 'error'
+            })
+        end
+        return fallback
+    end
+    return result
+end
+
+--- pcall korumalı context-menu açıcı. lib.registerContext/lib.showContext
+--- herhangi bir sebeple (ör. ox_lib henüz tam yüklenmemiş) hata fırlatırsa
+--- F10 tuşu tekrar basılabilir kalır, oyun UI thread'i asla asılı kalmaz.
+local function SafeOpenContext(id, title, options, menu)
+    local ok, err = pcall(function()
+        lib.registerContext({ id = id, title = title, menu = menu, options = options })
+        lib.showContext(id)
+    end)
+    if not ok then
+        if lib and lib.notify then
+            lib.notify({
+                title       = '[MATRIX MENU HATASI]',
+                description = 'Menu acilamadi (bagimlilik/hata): ' .. tostring(err),
+                type        = 'error'
+            })
+        end
+        print(('[MATRIX:HUD] SafeOpenContext(%s) basarisiz: %s'):format(tostring(id), tostring(err)))
+    end
+end
+
+--- ★ KATMAN 6 [K2 destek]: Bölge Denetleyicisi Atama diyaloğu
+--- (/denetleyiciata [zoneId] [botId]) — F10 Canlı Kadro bot aksiyon
+--- menüsünden bota tıklanınca açılır.
+OpenAssignInspectorDialog = function(botId)
+    local input = lib.inputDialog('Bolge Denetleyicisi Ata', {
+        { type = 'number', label = 'Bolge ID (zoneId)', required = true, min = 1, max = 2147483646 }
+    })
+    if not input then return end
+
+    local zoneId = SanitizeNumericArg(input[1], 1, 2147483646)
+    if not zoneId then NotifyInvalidInput('Bolge ID gecersiz.'); return end
+
+    ExecuteCommand(('denetleyiciata %s %s'):format(zoneId, botId))
+end
+
+--- ★ KATMAN 6 [K1]: Bota elden teslimat diyaloğu — oyuncunun KENDİ
+--- envanterindeki bir slotu, seçilen bota (server-authoritative, botId zaten
+--- roster'dan gelen SAYISAL bir değerdir) teslim eder.
+OpenGiveItemToBotDialog = function(botId)
+    local input = lib.inputDialog('Bota Esya Teslim Et', {
+        { type = 'number', label = 'Kendi Envanter Slotunuz', required = true, min = 1, max = 999 },
+        { type = 'number', label = 'Miktar', required = true, min = 1, max = 9999 }
+    })
+    if not input then return end
+
+    local slot = SanitizeNumericArg(input[1], 1, 999)
+    if not slot then NotifyInvalidInput('Slot numarasi gecersiz.'); return end
+
+    local count = SanitizeNumericArg(input[2], 1, 9999)
+    if not count then NotifyInvalidInput('Miktar gecersiz.'); return end
+
+    TriggerServerEvent('matrix:server:trapHouseInterior:giveItemToBot', botId, tonumber(slot), tonumber(count))
+end
+
+--- ★ KATMAN 6 [K1]: Bot envanterini listeler (salt-okunur) + eşya teslimatını
+--- alt menüye bağlar. server/trap_house_interior.lua'nın
+--- 'matrix:callback:getBotInventoryItems' callback'i zaten var olan tek
+--- endpoint'tir -- yeni bir sunucu-tarafı yol İCAT EDİLMEZ.
+OpenBotInventoryOpsMenu = function(botId)
+    local items = SafeAwaitCallback('matrix:callback:getBotInventoryItems', {}, botId)
+
+    local options = {
+        {
+            title       = '[+] Esya Teslim Et',
+            description = 'Kendi envanterinizden bota elden teslimat yapin.',
+            onSelect    = function() OpenGiveItemToBotDialog(botId) end
+        }
+    }
+
+    if type(items) == 'table' and #items > 0 then
+        for i = 1, #items do
+            local item = items[i]
+            if type(item) == 'table' then
+                options[#options + 1] = {
+                    title       = ('%s x%d'):format(tostring(item.label or item.name), tonumber(item.count) or 0),
+                    description = ('Slot #%s'):format(tostring(item.slot)),
+                    disabled    = true
+                }
+            end
+        end
+    else
+        options[#options + 1] = { title = '(Bot envanteri bos)', disabled = true }
+    end
+
+    SafeOpenContext(('matrix_bot_inv_%s'):format(tostring(botId)), 'Mühimmat / Envanter Ameliyatı', options,
+        ('matrix_bot_actions_%s'):format(tostring(botId)))
+end
+
+--- ★ KATMAN 7 [T2]: Mühimmat Sevkiyatı (/muhimmatsevk [lojistikBotId]
+--- [tetikciBotId]) — botId burada lojistik/kurye botudur, dialog yalnızca
+--- HEDEF (tetikçi) bot ID'sini sorar.
+OpenAmmoRunDialog = function(botId)
+    local input = lib.inputDialog('Muhimmat Sevkiyati', {
+        { type = 'number', label = 'Hedef (Tetikci) Bot ID', required = true, min = 1, max = MAX_BOT_ID }
+    })
+    if not input then return end
+
+    local targetBotId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    if not targetBotId then NotifyInvalidInput('Hedef Bot ID gecersiz.'); return end
+
+    ExecuteCommand(('muhimmatsevk %s %s'):format(botId, targetBotId))
+end
+
+--- ★ KATMAN 5 ULTIMATE [U2] / KATMAN 6 [K1]: Canlı Kadro'daki bir BOT
+--- satırına tıklanınca açılan aksiyon menüsü. botId, sunucudan gelen roster
+--- raporundaki (matrix:callback:getRosterReport) SAYISAL id alanıdır --
+--- serbest metin GEÇMEZ, bu yüzden ExecuteCommand enjeksiyon yüzeyi burada
+--- da [S1] disipliniyle KAPALI kalır.
+OpenBotActionsMenu = function(botId, botLabel)
+    botId = tonumber(botId)
+    if not botId then NotifyInvalidInput('Gecersiz bot ID.'); return end
+
+    SafeOpenContext(('matrix_bot_actions_%s'):format(tostring(botId)), botLabel or ('Bot #%d Aksiyonlari'):format(botId), {
+        {
+            title       = 'Bolge Denetleyicisi Ata',
+            description = '/denetleyiciata',
+            onSelect    = function() OpenAssignInspectorDialog(botId) end
+        },
+        {
+            title       = 'Muhimmat / Envanter Ameliyati',
+            description = 'Bot envanterini gor, esya teslim et.',
+            onSelect    = function() OpenBotInventoryOpsMenu(botId) end
+        },
+        {
+            title       = 'Muhimmat Sevkiyati',
+            description = '/muhimmatsevk',
+            onSelect    = function() OpenAmmoRunDialog(botId) end
+        },
+        {
+            title       = 'Acil Tahliyeyi Iptal Et (Panik Iptal)',
+            description = '/panikiptal',
+            onSelect    = function() ExecuteCommand(('panikiptal %d'):format(botId)) end
+        },
+        {
+            title       = 'Kilidi Ac (D1-v2 IO FAIL sonrasi)',
+            description = '/botkilitac',
+            onSelect    = function() ExecuteCommand(('botkilitac %d'):format(botId)) end
+        },
+        {
+            title       = '[!] Operatif Tasfiye (Hard-Delete)',
+            description = '/operatiftasfiye -- GERI ALINAMAZ.',
+            onSelect    = function() ExecuteCommand(('operatiftasfiye %d'):format(botId)) end
+        }
+    }, 'matrix_live_roster')
+end
+
+--- ★ Canlı Kadro alt menüsü: roster raporunu çeker, bot satırlarını
+--- tıklanabilir aksiyon menüsüne, oyuncu satırlarını salt-okunur bilgiye
+--- çevirir. SafeAwaitCallback sayesinde sunucu yanıt vermese/hata verse
+--- bile menü boş bir liste ile açılır, ASLA donmaz.
+local function OpenLiveRosterMenu()
+    local entries = SafeAwaitCallback('matrix:callback:getRosterReport', {})
+
+    local options = {}
+    if type(entries) == 'table' then
+        for i = 1, #entries do
+            local entry = entries[i]
+            if type(entry) == 'table' then
+                if entry.kind == 'bot' and type(entry.id) == 'number' then
+                    options[#options + 1] = {
+                        title       = entry.text or ('Bot #%d'):format(entry.id),
+                        description = entry.mole_flagged and 'SIGINT: kostebek supheli' or 'Aksiyon menusu icin secin',
+                        onSelect    = function() OpenBotActionsMenu(entry.id, entry.text) end
+                    }
+                else
+                    options[#options + 1] = { title = entry.text or '???', disabled = true }
+                end
+            end
+        end
+    end
+
+    if #options == 0 then
+        options[1] = { title = '(Canli Kadro bos)', disabled = true }
+    end
+
+    SafeOpenContext('matrix_live_roster', 'Canli Kadro', options, 'matrix_tactical_menu')
+end
+
+--- ★★★ MASTER MENÜ: F10 -> "Matrix Taktik Komuta Menüsü" ★★★
+--- ★ OPENAI DÜŞMAN ÇETE ALDATMA: Config.GangHoods.Hoods paylaşımlı
+--- (shared/config.lua) olduğundan client zaten görür -- sunucuya ekstra
+--- bir round-trip GEREKMEZ. Mesaj serbest metindir (ExecuteCommand'a
+--- GİTMEZ, TriggerServerEvent ile taşınır) -- [S1]'in enjeksiyon
+--- disiplini burada uygulanmaz çünkü hedef bir komut parse'ı değil,
+--- server/gang_hoods.lua'nın kendi uzunluk/cooldown kontrolleridir.
+local function OpenGangHoodDeceptionDialog()
+    local options = {}
+    for _, hood in ipairs(Config.GangHoods and Config.GangHoods.Hoods or {}) do
+        options[#options + 1] = { value = tostring(hood.id), label = hood.label }
+    end
+    if #options == 0 then
+        if lib and lib.notify then
+            lib.notify({ title = '[DUSMAN MAHALLE]', description = 'Tanimli dusman mahalle yok.', type = 'error' })
+        end
+        return
+    end
+
+    local input = lib.inputDialog('Dusman Ceteyi Aldat (Darkchat Dezenformasyon)', {
+        { type = 'select', label = 'Hedef Mahalle', required = true, options = options },
+        {
+            type = 'textarea', label = 'Dezenformasyon Metni', required = true,
+            description = ('En fazla %d karakter.'):format((Config.GangHoods.Deception and Config.GangHoods.Deception.MessageMaxLength) or 280)
+        }
+    })
+    if not input then return end
+
+    local hoodId = tonumber(input[1])
+    local message = tostring(input[2] or ''):match('^%s*(.-)%s*$')
+    if not hoodId then NotifyInvalidInput('Mahalle secimi gecersiz.'); return end
+    if message == '' then NotifyInvalidInput('Mesaj bos olamaz.'); return end
+
+    TriggerServerEvent('matrix:server:gangHood:sendDisinformation', hoodId, message)
+end
+
+local function OpenMainTacticalMenu()
+    SafeOpenContext('matrix_tactical_menu', 'MATRIX TAKTIK KOMUTA MENUSU', {
+        {
+            title       = 'Canli Kadro',
+            description = 'Botlari ve oyuncu rutbelerini listele, bir bota aksiyon uygula.',
+            onSelect    = function() OpenLiveRosterMenu() end
+        },
+        {
+            title       = 'Rota Ciz (Multi-Waypoint Otomatik Sevk)',
+            description = '/rotaciz',
+            onSelect    = function() OpenRotaCizDialog() end
+        },
+        {
+            title       = 'Trap House Durumu',
+            description = '/traphousedurum',
+            onSelect    = function() OpenTrapHouseDurumDialog() end
+        },
+        {
+            title       = "Trap House'a Git (Waypoint)",
+            description = 'GPS waypoint ayarla',
+            onSelect    = function() OpenTrapHouseWaypointDialog() end
+        },
+        {
+            title       = 'Kapi Surgu Tahkimati',
+            description = '/tahkimatdurum + satin alma',
+            onSelect    = function() OpenDoorReinforcementDialog() end
+        },
+        {
+            title       = 'Dusman Ceteyi Aldat (Darkchat Dezenformasyon)',
+            description = 'OpenAI/deterministik ikna skoru -- basarili olursa cetenin alarm seviyesi dusurulur.',
+            onSelect    = function() OpenGangHoodDeceptionDialog() end
+        },
+        {
+            title       = 'Rutbe Ata',
+            description = '/rutbeata',
+            onSelect    = function() OpenRutbeAtaDialog() end
+        },
+        {
+            title       = 'Fiziksel Muhafiz/Kurye Takipci Cagir',
+            description = '/muhafizcagir',
+            onSelect    = function() ExecuteCommand('muhafizcagir') end
+        },
+        {
+            title       = 'Matrix Dump (Debug)',
+            description = '/matrixdump',
+            onSelect    = function() OpenMatrixDump() end
+        }
+    })
+end
+
+RegisterCommand('taktikmenu', function()
+    -- ★ FAIL-SAFE: OpenMainTacticalMenu zaten SafeOpenContext ile
+    -- sarmalıdır; burada EK bir pcall, o fonksiyonun kendisinin (options
+    -- inşası sırasında) fırlatabileceği bir hatayı da yutar -- F10 tuşu
+    -- HİÇBİR koşulda oyuncuyu kilitli bir UI state'inde bırakmaz.
+    local ok, err = pcall(OpenMainTacticalMenu)
+    if not ok then
+        print(('[MATRIX:HUD] taktikmenu acilirken hata (yutuldu): %s'):format(tostring(err)))
+        if lib and lib.notify then
+            lib.notify({ title = '[MATRIX MENU HATASI]', description = 'Menu acilamadi, tekrar deneyin.', type = 'error' })
+        end
+    end
+end, false)
+
+RegisterKeyMapping('taktikmenu', 'Matrix Taktik Komuta Menusu ac', 'keyboard', Config.Hud and Config.Hud.MenuKey or 'F10')
 -- TriggerServerEvent('matrix:server:phone:remoteWipe', nil) -- nil = kendi dna_id

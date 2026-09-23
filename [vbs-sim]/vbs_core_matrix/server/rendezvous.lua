@@ -351,7 +351,7 @@ end)
 -- =====================================================================
 -- TAKTİK DEBUG PANELİ
 -- =====================================================================
-RegisterCommand('rendezvousdurum', function(src)
+Matrix.Security.RegisterGatedCommand('rendezvousdurum', function(src)
     local count = 0
     for id, h in pairs(PendingHandoffs) do
         count = count + 1
@@ -362,7 +362,7 @@ RegisterCommand('rendezvousdurum', function(src)
         for _ in pairs(ActiveAmbush) do n = n + 1 end
         return n
     end)()))
-end, false)
+end)
 
 
 exports('ScheduleHandoff', function(src, citizenid, opts) return Matrix.Rendezvous.ScheduleHandoff(src, citizenid, opts) end)

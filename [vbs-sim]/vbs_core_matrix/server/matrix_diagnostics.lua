@@ -269,6 +269,45 @@ local function AddCheck(name, fn)
     FastChecks[#FastChecks + 1] = { name = name, fn = fn }
 end
 
+-- =====================================================================
+-- ★★★ [KATMAN 24] SANDBOX: ACE PRIVILEGE VERIFICATION — BRUTAL GATEKEEPER ★★★
+-- Bu kontrol BİLİNÇLİ OLARAK dosyanın/döngünün EN TEPESİNDEDİR (ilk
+-- AddCheck çağrısı). server/main.lua Matrix.Security.DangerousCommands
+-- (kanonik tehlikeli/debug komut listesi) İÇİNDEKİ HER ismin, GERÇEKTEN
+-- Matrix.Security.RegisterGatedCommand ÜZERİNDEN kayıt edildiğini
+-- (Matrix.Security.GatedCommands'te işaretli olduğunu) doğrular. Biri
+-- eksikse -- ister yeni eklenen bir debug komutu unutulduğu için, ister
+-- birisi bir gate'i yanlışlıkla çıplak RegisterCommand'a geri çevirdiği
+-- için -- bu, tanımı gereği bir "hayalet debug komutu"dur: restricted
+-- bayrağı fiilen false kalmış, group.admin/command.matrix_supervisor
+-- ACE kontrolünden GEÇMEYEN bir komut demektir. AbortResourceOnSimulationFailure
+-- açıkken (varsayılan) bu FastChecks'in bir PARÇASI olduğu için (yalnızca
+-- deep/SimulationChecks'e değil) HER diagnostics taramasında -- hızlı VEYA
+-- derin, otomatik boot VEYA manuel -- çalışır ve tek bir eksik bile
+-- sunucu açılışını sert şekilde durdurur (bkz. AbortResourceBoot).
+-- =====================================================================
+AddCheck('Sandbox: ACE Privilege Verification', function()
+    if not (Matrix.Security and type(Matrix.Security.DangerousCommands) == 'table'
+        and type(Matrix.Security.GatedCommands) == 'table') then
+        return false, 'Matrix.Security alt-sistemi yuklenmemis -- sandbox ACE guvenlik katmani YOK.'
+    end
+
+    local ghosts = {}
+    for _, name in ipairs(Matrix.Security.DangerousCommands) do
+        if not Matrix.Security.GatedCommands[name] then
+            ghosts[#ghosts + 1] = name
+        end
+    end
+
+    if #ghosts > 0 then
+        return false, ('HAYALET DEBUG KOMUTU tespit edildi (restricted=false / ACE kapisi UYGULANMAMIS): %s'):format(
+            table.concat(ghosts, ', '))
+    end
+
+    return true, ('%d tehlikeli/debug komutun tamami RegisterGatedCommand uzerinden kayitli (restricted=true + group.admin/command.matrix_supervisor).'):format(
+        #Matrix.Security.DangerousCommands)
+end)
+
 AddCheck('TrapHouseInterior.Shell koordinat tutarlılığı', function()
     local shell = Config.TrapHouseInterior and Config.TrapHouseInterior.Shell
     if not shell or not shell.EnterCoords or not shell.ExitCoords then
@@ -1269,6 +1308,25 @@ function Matrix.Diagnostics.Run(deep, replyTo, isAutoBoot)
             passed, #checks, tostring(lastReport.deep), lastReport.duration_ms,
             lastReport.sealed and 'MUHURLENDI (0 hata)' or ('%d HATA'):format(failed))
 
+        -- ★ [KATMAN 24] BRUTAL GATEKEEPER: 'Sandbox: ACE Privilege
+        -- Verification' kontrolü, Config.Diagnostics.AbortResourceOnSimulationFailure
+        -- bayrağından BAĞIMSIZ olarak HER ZAMAN sert bir abort tetikler.
+        -- NEDEN: o bayrak, sunucuya özgü kurulum eksikliklerinde (item adı
+        -- yer tutucusu, henüz uygulanmamış SQL migration) sahte alarmları
+        -- önlemek için BİLİNÇLİ olarak false varsayılana çekilmişti (bkz.
+        -- dosya başı KATMAN 22 yorumu) -- bu, o güvenlik supabına
+        -- DOKUNMADAN, yalnızca ACE hardening'in kendisi (tamamen sunucu
+        -- kurulumundan bağımsız, saf kod-durumu kontrolü) başarısız
+        -- olduğunda ayrı ve KOŞULSUZ bir abort yolu ekler.
+        local aceCheck = nil
+        for _, c in ipairs(checks) do
+            if c.name == 'Sandbox: ACE Privilege Verification' then aceCheck = c; break end
+        end
+        if isAutoBoot and aceCheck and not aceCheck.passed then
+            AbortResourceBoot(('[BRUTAL GATEKEEPER] %s'):format(aceCheck.detail))
+            return
+        end
+
         if isAutoBoot and failed > 0 and Config.Diagnostics.AbortResourceOnSimulationFailure then
             local firstFailure = nil
             for _, c in ipairs(checks) do
@@ -1406,13 +1464,13 @@ end)
 -- =====================================================================
 -- /matrix_run_diagnostics — manuel kısa özet çalıştırma
 -- =====================================================================
-RegisterCommand('matrix_run_diagnostics', function(src, args)
+Matrix.Security.RegisterGatedCommand('matrix_run_diagnostics', function(src, args)
     local deep = args[1] == Config.Diagnostics.DeepModeCommandArg
     Reply(src, deep
         and 'Derin tani calistiriliyor (Config sabotaj + SimulationChecks + kullan-at test botu)...'
         or 'Hizli tani calistiriliyor...')
     Matrix.Diagnostics.Run(deep, src, false)
-end, false)
+end)
 
 exports('GetDiagnosticsReport', function() return lastReport end)
 exports('RunDiagnostics',      function(deep) return Matrix.Diagnostics.Run(deep, nil, false) end)
@@ -1532,7 +1590,7 @@ do
         end)
     end
 
-    RegisterCommand('matrix_diag_detay', function(src, args)
+    Matrix.Security.RegisterGatedCommand('matrix_diag_detay', function(src, args)
         local a1 = tostring(args[1] or ''):lower()
 
         if a1 == 'deep' then
@@ -1606,7 +1664,7 @@ do
         end
 
         _DumpReport(src, nil, nil, false)
-    end, false)
+    end)
 
     exports('DumpDiagnosticsReport', function(replyTo, filterKind, filterValue, verbose)
         _DumpReport(replyTo, filterKind, filterValue, verbose)

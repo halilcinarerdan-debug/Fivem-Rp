@@ -22,6 +22,9 @@ client_scripts {
 
 server_scripts {
     '@oxmysql/lib/MySQL.lua',
+    -- ★ [SEC] server-only sirlar (OpenAI apiKey vb.) -- ASLA shared_scripts'e
+    -- TASINMAZ (bkz. dosya-ici yorum). main.lua'dan ONCE yuklenir.
+    'server/config_secrets.lua',
     'server/main.lua',
     'server/forensics.lua',
     'server/recruitment.lua',

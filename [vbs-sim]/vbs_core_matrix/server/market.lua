@@ -111,6 +111,42 @@ function Matrix.Hierarchy.HasCommandAuthority(citizenid)
 end
 
 
+--- ★ [SEC-CRITICAL] Kaç Leader atanmış sayar -- ilk-açılış bootstrap'ı
+--- (aşağıdaki CanAssignRank) için gerekli: hiç Leader yoksa birinin ilk
+--- Leader'ı atayabilmesi gerekir, aksi halde hiyerarşi hiç başlayamaz.
+function Matrix.Hierarchy.CountLeaders()
+    local n = 0
+    for _, rec in pairs(HierarchyRanks) do
+        if rec.rank == 'Leader' then n = n + 1 end
+    end
+    return n
+end
+
+--- ★ [SEC-CRITICAL] /rutbeata KAPISI. Bu fonksiyon YOKKEN /rutbeata
+--- HİÇBİR yetki kontrolü YAPMIYORDU -- herhangi bir bağlı oyuncu kendini
+--- (veya başka birini) doğrudan 'Leader' yapıp, bu isim-uzayındaki HER
+--- Matrix.Hierarchy.HasCommandAuthority kapısını (org-gated onlarca komut)
+--- geçersiz kılabiliyordu. Artık YALNIZCA mevcut bir 'Leader' VEYA sunucu
+--- supervisoru (group.admin/command.matrix_supervisor) rütbe atayabilir;
+--- TEK istisna, sunucuda HENÜZ hiç Leader yokken ilk atamayı yapmaktır
+--- (bootstrap -- aksi halde hiyerarşi hiçbir zaman başlayamaz).
+function Matrix.Hierarchy.CanAssignRank(assignerCitizenid, assignerSrc)
+    if Matrix.Security and Matrix.Security.IsSupervisor and type(assignerSrc) == 'number'
+        and Matrix.Security.IsSupervisor(assignerSrc) then
+        return true
+    end
+    if type(assignerCitizenid) == 'string' and Matrix.Hierarchy.GetRank(assignerCitizenid) == 'Leader' then
+        return true
+    end
+    if Matrix.Hierarchy.CountLeaders() == 0 then
+        Matrix.Log('MARKET',
+            '[HIYERARSI BOOTSTRAP] Sunucuda henuz Leader yok -- src=%s ILK Leader atamasini yapiyor.',
+            tostring(assignerSrc))
+        return true
+    end
+    return false
+end
+
 function Matrix.Hierarchy.SetRank(citizenid, rank, assignedBy)
     if type(citizenid) ~= 'string' or citizenid == '' then return false, 'bad_citizenid' end
     if not Config.Hierarchy.Ranks[rank] then return false, 'bad_rank' end
@@ -149,14 +185,25 @@ RegisterCommand('rutbeata', function(src, args)
     end
 
 
+    local assignerState = Matrix.GetOrCreatePlayerState(src)
+    local assignerCitizenid = assignerState and assignerState.citizenid
+
+    if not Matrix.Hierarchy.CanAssignRank(assignerCitizenid, src) then
+        Reply(src, 'Yetkisiz: rutbe atamasi yalnizca mevcut bir Leader veya sunucu supervisoru tarafindan yapilabilir.')
+        if Matrix.Security and Matrix.Security.LogTamperAttempt then
+            Matrix.Security.LogTamperAttempt(src, 'rutbeata', args)
+        end
+        return
+    end
+
+
     local targetCitizenid = ResolveTargetCitizenidWithRetry(targetSrc)
     if not targetCitizenid then
         Reply(src, 'Hedef oyuncu bulunamadi (3 deneme sonrasi da cozulemedi; oyuncu hala yukleniyor olabilir, birkac saniye sonra tekrar deneyin).'); return
     end
 
 
-    local assignerState = Matrix.GetOrCreatePlayerState(src)
-    local ok, reason = Matrix.Hierarchy.SetRank(targetCitizenid, rank, assignerState and assignerState.citizenid)
+    local ok, reason = Matrix.Hierarchy.SetRank(targetCitizenid, rank, assignerCitizenid)
     if ok then
         Reply(src, ('%s rutbesi %s olarak ayarlandi.'):format(targetCitizenid, rank))
     elseif reason == 'bad_rank' then
@@ -389,7 +436,7 @@ RegisterNetEvent('matrix:server:reportSaleAttempt', function(botId, buyerCogniti
 end)
 
 
-RegisterCommand('piyasasifirla', function(src, args)
+Matrix.Security.RegisterGatedCommand('piyasasifirla', function(src, args)
     local zoneId = tonumber(args[1])
     if not zoneId then Reply(src, 'Kullanim: /piyasasifirla [zoneId]'); return end
 
@@ -401,7 +448,7 @@ RegisterCommand('piyasasifirla', function(src, args)
 
 
     Reply(src, ('Bolge #%d fiyat carpani varsayilana (x%.2f) sifirlandi.'):format(zoneId, Config.Market.PriceMultiplierDefault))
-end, false)
+end)
 
 
 RegisterCommand('piyasasorgu', function(src, args)
@@ -705,7 +752,7 @@ local function FlushDirtyCash()
 end
 
 
-RegisterCommand('nakityatir', function(src, args)
+Matrix.Security.RegisterGatedCommand('nakityatir', function(src, args)
     local trapHouseId = tonumber(args[1])
     local amount = tonumber(args[2])
     if not trapHouseId or not Matrix.TrapHouses[trapHouseId] or not amount then
@@ -713,10 +760,10 @@ RegisterCommand('nakityatir', function(src, args)
     end
     Matrix.CashDecay.Deposit(trapHouseId, amount)
     Reply(src, ('Trap #%d kirli nakit: %.1f'):format(trapHouseId, CashByTrapHouse[trapHouseId].dirty_amount))
-end, false)
+end)
 
 
-RegisterCommand('nakitakla', function(src, args)
+Matrix.Security.RegisterGatedCommand('nakitakla', function(src, args)
     local trapHouseId = tonumber(args[1])
     local amount = tonumber(args[2])
     if not trapHouseId or not amount then Reply(src, 'Kullanim: /nakitakla [trapHouseId] [miktar]'); return end
@@ -725,7 +772,7 @@ RegisterCommand('nakitakla', function(src, args)
     local ok = Matrix.CashDecay.Launder(trapHouseId, amount)
     Reply(src, ok and ('Aklandi. Kalan kirli nakit: %.1f'):format(CashByTrapHouse[trapHouseId].dirty_amount)
               or 'Aklama basarisiz (kayit yok veya gecersiz miktar).')
-end, false)
+end)
 
 
 RegisterCommand('nakitdurum', function(src, args)
@@ -790,7 +837,7 @@ CreateThread(function()
 end)
 
 
-RegisterCommand('gizliajandurum', function(src)
+Matrix.Security.RegisterGatedCommand('gizliajandurum', function(src)
     local count = 0
     for citizenid in pairs(UndercoverFlags) do
         count = count + 1
@@ -798,7 +845,7 @@ RegisterCommand('gizliajandurum', function(src)
     end
     Reply(src, ('--- Toplam %d isaretli gizli ajan | Propaganda-Momentum:%.2f (esik:%.2f) ---'):format(
         count, Matrix.Bureau.GetPropagandaMomentum(), Config.Undercover.InfiltrationMomentumThreshold))
-end, false)
+end)
 
 
 -- =====================================================================
@@ -1287,7 +1334,7 @@ RegisterCommand('denetleyiciata', function(src, args)
 end, false)
 
 
-RegisterCommand('denetleyicidurum', function(src)
+Matrix.Security.RegisterGatedCommand('denetleyicidurum', function(src)
     local count = 0
     for zoneId, botId in pairs(ZoneInspectors) do
         count = count + 1
@@ -1302,7 +1349,7 @@ RegisterCommand('denetleyicidurum', function(src)
         for _ in pairs(MoleFlags) do n = n + 1 end
         return n
     end)()))
-end, false)
+end)
 
 
 -- =====================================================================
@@ -1529,7 +1576,7 @@ lib.callback.register('matrix:callback:getRegionalFinancialReport', function(src
 end)
 
 
-RegisterCommand('bolgeselrapor', function(src)
+Matrix.Security.RegisterGatedCommand('bolgeselrapor', function(src)
     for _, zoneCfg in ipairs(Config.Market.Zones) do
         local ledger = ZoneLedger[zoneCfg.id]
         if ledger and ledger.sale_count > 0 then
@@ -1540,7 +1587,7 @@ RegisterCommand('bolgeselrapor', function(src)
             Reply(src, ('#%d %s | Veri yok'):format(zoneCfg.id, zoneCfg.label))
         end
     end
-end, false)
+end)
 
 
 -- =====================================================================
@@ -1959,7 +2006,7 @@ lib.callback.register('matrix:callback:getStreetDealingReport', function(src)
 end)
 
 
-RegisterCommand('sokaksatisrapor', function(src)
+Matrix.Security.RegisterGatedCommand('sokaksatisrapor', function(src)
     local report = {}
     local activeCount = 0
     for _ in pairs(DealingActivePlayers) do activeCount = activeCount + 1 end
@@ -1971,7 +2018,7 @@ RegisterCommand('sokaksatisrapor', function(src)
                 botId, bot.name, BotStreetCash[botId] or 0.0, level, Config.Market.StreetDealing.RecruitAddictionThreshold))
         end
     end
-end, false)
+end)
 
 
 -- =====================================================================

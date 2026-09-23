@@ -911,7 +911,7 @@ end
 -- error_coefficient/output_purity formüllerini bot skill/fatigue/cortisol
 -- değerleriyle test eder. trapHouseId GERÇEKTEN var olmalı (matrix_kitchen_
 -- batches.trap_house_id -> matrix_trap_houses FK constraint'i nedeniyle).
-RegisterCommand('mutfaktest', function(src, args)
+Matrix.Security.RegisterGatedCommand('mutfaktest', function(src, args)
     local botId = tonumber(args[1])
     local trapHouseId = tonumber(args[2])
     local rawWeight  = tonumber(args[3]) or 100.0
@@ -929,11 +929,11 @@ RegisterCommand('mutfaktest', function(src, args)
     Reply(src, ('Teorik:%.3f Hata:%.3f Çıkış-Saflık:%.3f Çalıntı:%.1fg Rakip-Sızma:%s'):format(
         result.theoretical_purity, result.error_coefficient, result.output_purity,
         result.theft_amount, tostring(result.rival_infiltration)))
-end, false)
+end)
 
 
 -- /dakikadongusu [botId] - ProcessMinuteCycle'ı 60sn beklemeden anlık çalıştırır.
-RegisterCommand('dakikadongusu', function(src, args)
+Matrix.Security.RegisterGatedCommand('dakikadongusu', function(src, args)
     local botId = tonumber(args[1])
     local bot = botId and Matrix.Bots[botId]
     if not bot then Reply(src, 'Kullanim: /dakikadongusu [botId]'); return end
@@ -942,11 +942,11 @@ RegisterCommand('dakikadongusu', function(src, args)
     Matrix.Kitchen.ProcessMinuteCycle(bot)
     Reply(src, ('Bot #%d dakika döngüsü çalıştı. Yorgunluk:%.3f Kortizol:%.3f Chem:%.3f'):format(
         botId, bot.biology.fatigue_level, bot.biology.cortisol_level, bot.psychology.skill_chemistry))
-end, false)
+end)
 
 
 -- /saatdongusu [botId] - ProcessHourCycle'ı 3600sn beklemeden anlık çalıştırır.
-RegisterCommand('saatdongusu', function(src, args)
+Matrix.Security.RegisterGatedCommand('saatdongusu', function(src, args)
     local botId = tonumber(args[1])
     local bot = botId and Matrix.Bots[botId]
     if not bot then Reply(src, 'Kullanim: /saatdongusu [botId]'); return end
@@ -954,13 +954,13 @@ RegisterCommand('saatdongusu', function(src, args)
 
     Matrix.Kitchen.ProcessHourCycle(bot)
     Reply(src, ('Bot #%d saat döngüsü çalıştı. Yoksunluk:%.3f'):format(botId, bot.biology.withdrawal_index))
-end, false)
+end)
 
 
 -- /yakalatest [botId] [trapHouseId] - OnCaptured'ı (I_snitch formülü) doğrudan
 -- tetikler; normalde bir baskın/çatışma sonrası dolaylı çağrılır. trapHouseId
 -- GERÇEKTEN var olmalı (matrix_snitch_events'in FK constraint'i nedeniyle).
-RegisterCommand('yakalatest', function(src, args)
+Matrix.Security.RegisterGatedCommand('yakalatest', function(src, args)
     local botId = tonumber(args[1])
     local trapHouseId = tonumber(args[2])
     if not botId or not Matrix.Bots[botId] or not trapHouseId or not Matrix.TrapHouses[trapHouseId] then
@@ -970,12 +970,12 @@ RegisterCommand('yakalatest', function(src, args)
 
     local snitchIndex, didSnitch = Matrix.Kitchen.OnCaptured(botId, trapHouseId)
     Reply(src, ('Bot #%d yakalandı. I_snitch=%.3f İhbar:%s'):format(botId, snitchIndex, tostring(didSnitch)))
-end, false)
+end)
 
 
 -- /kortizolsicramasi [botId] [gunshot|bureau_vehicle] - AdjustCortisol'ı bir
 -- BOTA uygular (main.lua'daki /kortizoltetikle sadece çağıran oyuncuyu hedefler).
-RegisterCommand('kortizolsicramasi', function(src, args)
+Matrix.Security.RegisterGatedCommand('kortizolsicramasi', function(src, args)
     local botId = tonumber(args[1])
     local spikeType = args[2] or 'gunshot'
     if not botId or not Matrix.Bots[botId] then
@@ -985,11 +985,11 @@ RegisterCommand('kortizolsicramasi', function(src, args)
 
     Matrix.Kitchen.AdjustCortisol({ kind = 'bot', id = botId }, spikeType)
     Reply(src, ('Bot #%d kortizol: %.3f'):format(botId, Matrix.Bots[botId].biology.cortisol_level))
-end, false)
+end)
 
 
 -- /katmandurum [botId] - matrix_knowledge_mask'i test amacli gosterir.
-RegisterCommand('katmandurum', function(src, args)
+Matrix.Security.RegisterGatedCommand('katmandurum', function(src, args)
     local botId = tonumber(args[1])
     if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /katmandurum [botId]'); return end
 
@@ -1001,17 +1001,17 @@ RegisterCommand('katmandurum', function(src, args)
 
     Reply(src, ('Bot #%d (rol:%s) -> Bolge:%s | Ana-Us-Biliyor:%s | Bilinen-Dead-Drop:%d'):format(
         botId, mask.role_snapshot, tostring(mask.zone_id), tostring(mask.knows_main_base), dropCount))
-end, false)
+end)
 
 -- /katmantemizle [botId] - FlushKatmanKnowledge'i elle tetikler (test/rol
 -- degisimi sonrasi manuel temizlik icin).
-RegisterCommand('katmantemizle', function(src, args)
+Matrix.Security.RegisterGatedCommand('katmantemizle', function(src, args)
     local botId = tonumber(args[1])
     if not botId or not Matrix.Bots[botId] then Reply(src, 'Kullanim: /katmantemizle [botId]'); return end
 
     Matrix.Kitchen.FlushKatmanKnowledge(botId)
     Reply(src, ('Bot #%d icin katman bilgisi temizlendi ve yeniden kuruldu.'):format(botId))
-end, false)
+end)
 
 
 exports('FlushKatmanKnowledge', function(botId) return Matrix.Kitchen.FlushKatmanKnowledge(botId) end)

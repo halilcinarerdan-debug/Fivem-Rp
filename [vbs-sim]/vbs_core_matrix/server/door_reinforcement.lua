@@ -24,6 +24,8 @@ local pairs, ipairs, type, tostring = pairs, ipairs, type, tostring
 local tonumber, math                = tonumber, math
 local math_max, math_floor          = math.max, math.floor
 local TriggerClientEvent            = TriggerClientEvent
+local GetPlayerPed                  = GetPlayerPed
+local GetEntityCoords               = GetEntityCoords
 
 
 local function Reply(src, msg)
@@ -145,7 +147,11 @@ function Matrix.DoorReinforcement.GetBreachDelaySeconds(trapHouseId)
 end
 
 
-function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel)
+--- skipCharge=true: magaza-esyasi akisindan cagrildigi anlamina gelir
+--- (odeme ZATEN esyayi satin alirken alindi) -- F10 dialog akisi
+--- (skipCharge=nil/false) ChargeCash'i HER ZAMAN kendi cagirmaya devam eder,
+--- davranis DEGISMEZ.
+function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel, skipCharge)
     trapHouseId = tonumber(trapHouseId)
     targetLevel = tonumber(targetLevel)
     if not trapHouseId or not Matrix.TrapHouses[trapHouseId] then return false, 'bad_trap_house' end
@@ -158,8 +164,10 @@ function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel)
 
 
     local cfg = Config.DoorReinforcement.Levels[targetLevel]
-    local ok, reason = ChargeCash(src, cfg.price)
-    if not ok then return false, reason end
+    if not skipCharge then
+        local ok, reason = ChargeCash(src, cfg.price)
+        if not ok then return false, reason end
+    end
 
 
     DoorLevel[trapHouseId] = targetLevel
@@ -198,6 +206,171 @@ RegisterNetEvent('matrix:server:doorReinforcement:install', function(trapHouseId
 
     Reply(src, ('%s monte edildi. Kapı kırılma süresi artık daha uzun.'):format(resultOrReason.label))
 end)
+
+
+-- =====================================================================
+-- ★ DÜŞMAN TRAP HOUSE KAPI KIRMA DONANIMI (breaching_tool) ★
+--
+-- Server-otoriteli: HİÇBİR adım client'ın "başardım" beyanına güvenmez.
+--   1) Hedef trap house'un GERÇEKTEN tahkim edilmiş olması gerekir
+--      (DoorLevel > 0) -- sıfır seviyede kırma aleti GEREKSİZDİR.
+--   2) Aynı anda YALNIZCA bir kişi bir kapıyı kırabilir (ActiveBreaches
+--      ile per-trapHouse mutex) -- eşzamanlı çoklu kırma girişimi engeli.
+--   3) Süre boyunca HER RecheckIntervalMs'de mesafe + item + ped varlığı
+--      YENİDEN doğrulanır -- "başlat ve uzaklaş" veya "aleti sat/düşür"
+--      ile bypass İMKANSIZDIR.
+--   4) Alet yalnızca BAŞARILI kırmada tüketilir (RemoveItem) -- iptal/
+--      kesinti durumunda oyuncu aleti kaybetmez.
+--   5) Örgüt hiyerarşisi (HasCommandAuthority) BİLİNÇLİ OLARAK aranmaz --
+--      bu, Install'ın (yukarıda) tam tersi: "dışarıdan" bir saldırı eylemi.
+-- =====================================================================
+local ActiveBreaches = {} -- trapHouseId -> { src, started_at, duration, level }
+
+
+local function CountPlayerItem(src, itemName)
+    local ok, count = pcall(function()
+        return exports['ox_inventory']:Search(src, 'count', itemName)
+    end)
+    if not ok or type(count) ~= 'number' then return 0 end
+    return count
+end
+
+
+local function DistanceToTrapHouse(src, trapHouseId)
+    local house = Matrix.TrapHouses[trapHouseId]
+    if not house or not house.coords then return math.huge end
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return math.huge end
+    local okCoords, coords = pcall(GetEntityCoords, ped)
+    if not okCoords or not coords then return math.huge end
+    local dx, dy, dz = coords.x - house.coords.x, coords.y - house.coords.y, coords.z - house.coords.z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+
+--- Kırma girişimini BAŞLATIR (henüz tamamlamaz). Tüm ön-koşullar server
+--- tarafında doğrulanır; başarısızlıkta net bir 'reason' döner.
+function Matrix.DoorReinforcement.StartBreach(src, trapHouseId)
+    trapHouseId = tonumber(trapHouseId)
+    if not trapHouseId or not Matrix.TrapHouses[trapHouseId] then return false, 'bad_trap_house' end
+
+    local level = Matrix.DoorReinforcement.GetLevel(trapHouseId)
+    if level <= 0 then return false, 'not_reinforced' end
+
+    if ActiveBreaches[trapHouseId] then return false, 'already_being_breached' end
+    for _, breach in pairs(ActiveBreaches) do
+        if breach.src == src then return false, 'already_breaching_elsewhere' end
+    end
+
+    local toolCfg = Config.DoorReinforcement.BreachingTool
+    if CountPlayerItem(src, toolCfg.ItemName) < 1 then return false, 'missing_tool' end
+
+    if DistanceToTrapHouse(src, trapHouseId) > toolCfg.MaxRangeMeters then
+        return false, 'too_far'
+    end
+
+    local duration = toolCfg.BaseSeconds + (level * toolCfg.PerLevelSecondsBonus)
+
+    ActiveBreaches[trapHouseId] = {
+        src         = src,
+        started_at  = Matrix.Now(),
+        duration    = duration,
+        level       = level
+    }
+
+    -- İçerideki savunucular İÇİN adil telegraf: barikat zorlanıyor uyarısı
+    -- (Last Stand ile AYNI occupant-bulma deseni).
+    local occupants = (Matrix.TrapHouseInterior and Matrix.TrapHouseInterior.GetOccupants
+        and Matrix.TrapHouseInterior.GetOccupants(trapHouseId)) or {}
+    for _, occupantSrc in ipairs(occupants) do
+        TriggerClientEvent('matrix:client:doorReinforcement:breachStarted', occupantSrc, trapHouseId, duration)
+    end
+
+    Matrix.Log('DOORREINFORCEMENT',
+        '[KAPI KIRMA BASLADI] src=%d trap=#%d seviye=%d sure=%ds alet=%s',
+        src, trapHouseId, level, duration, toolCfg.ItemName)
+
+    return true, duration
+end
+
+
+local function CancelBreach(trapHouseId, reason)
+    local breach = ActiveBreaches[trapHouseId]
+    if not breach then return end
+    ActiveBreaches[trapHouseId] = nil
+    TriggerClientEvent('matrix:client:doorReinforcement:breachCancelled', breach.src, trapHouseId, reason)
+    Matrix.Log('DOORREINFORCEMENT',
+        '[KAPI KIRMA IPTAL] src=%s trap=#%d sebep=%s',
+        tostring(breach.src), trapHouseId, tostring(reason))
+end
+
+
+local function CompleteBreach(trapHouseId)
+    local breach = ActiveBreaches[trapHouseId]
+    if not breach then return end
+    ActiveBreaches[trapHouseId] = nil
+
+    -- ★ Alet YALNIZCA burada, gerçek tamamlanma anında tüketilir.
+    local toolCfg = Config.DoorReinforcement.BreachingTool
+    local removeOk, removed = pcall(function()
+        return exports['ox_inventory']:RemoveItem(breach.src, toolCfg.ItemName, 1)
+    end)
+    if not (removeOk and removed == true) then
+        Matrix.Log('DOORREINFORCEMENT',
+            '[KAPI KIRMA IPTAL] src=%d trap=#%d sebep=alet_artik_yok (tamamlanma anında dogrulama basarisiz)',
+            breach.src, trapHouseId)
+        TriggerClientEvent('matrix:client:actionNotify', breach.src, false, 'Kirma aleti artik envanterinizde yok.')
+        return
+    end
+
+    local newLevel = math_max(0, breach.level - toolCfg.LevelsBypassedOnBreach)
+    DoorLevel[trapHouseId] = newLevel
+    dirtyLevel[trapHouseId] = 'BREACHED'
+
+    TriggerClientEvent('matrix:client:doorReinforcement:breachSucceeded', breach.src, trapHouseId, newLevel)
+
+    local occupants = (Matrix.TrapHouseInterior and Matrix.TrapHouseInterior.GetOccupants
+        and Matrix.TrapHouseInterior.GetOccupants(trapHouseId)) or {}
+    for _, occupantSrc in ipairs(occupants) do
+        TriggerClientEvent('matrix:client:doorReinforcement:breachSucceeded', occupantSrc, trapHouseId, newLevel)
+    end
+
+    -- ★ Adli değerlendirme köprüsü (server/forensics.lua) -- pcall'lı,
+    -- forensics.lua yüklenmemiş/kaldırılmış olsa bile bu dosya ÇÖKMEZ.
+    if Matrix.Forensics and Matrix.Forensics.RecordBreachToolMarks then
+        pcall(Matrix.Forensics.RecordBreachToolMarks, breach.src, trapHouseId, toolCfg.ItemName)
+    end
+
+    Matrix.Log('DOORREINFORCEMENT',
+        '[KAPI KIRILDI] src=%d trap=#%d eski_seviye=%d -> yeni_seviye=%d',
+        breach.src, trapHouseId, breach.level, newLevel)
+end
+
+
+RegisterNetEvent('matrix:server:doorReinforcement:startBreach', function(trapHouseId)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+
+    local ok, durationOrReason = Matrix.DoorReinforcement.StartBreach(src, trapHouseId)
+    if not ok then
+        local messages = {
+            bad_trap_house           = 'Gecersiz trap house.',
+            not_reinforced           = 'Bu kapi zaten tahkimatsiz -- alete gerek yok.',
+            already_being_breached   = 'Bu kapi zaten baska biri tarafindan zorlaniyor.',
+            already_breaching_elsewhere = 'Zaten baska bir kapiyi zorluyorsunuz.',
+            missing_tool             = 'Hidrolik levye (kirma aleti) envanterinizde yok.',
+            too_far                  = 'Kapiya yeterince yakin degilsiniz.'
+        }
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            messages[durationOrReason] or ('Kirma baslatilamadi: %s'):format(tostring(durationOrReason)))
+        return
+    end
+    TriggerClientEvent('matrix:client:actionNotify', src, true,
+        ('Kirma baslatildi. Sure: %ds -- konumunuzu koruyun.'):format(durationOrReason))
+end)
+
+
+exports('StartDoorBreach', function(src, trapHouseId) return Matrix.DoorReinforcement.StartBreach(src, trapHouseId) end)
 
 
 -- =====================================================================
@@ -276,6 +449,30 @@ CreateThread(function()
                     trapHouseId, #occupants)
             end
         end
+
+        -- ★ KAPI KIRMA (breaching_tool) İLERLEME/YENİDEN-DOĞRULAMA:
+        -- ayrı bir Wait(0)/hot-loop AÇILMAZ, AYNI 1000ms tarama bütçesi
+        -- paylaşılır (0.00ms ResMon ilkesiyle tutarlı). Her turda mesafe
+        -- ve alet varlığı YENİDEN kontrol edilir -- "başlat ve uzaklaş"
+        -- veya aleti düşür/sat ile bypass mümkün değildir.
+        for trapHouseId, breach in pairs(ActiveBreaches) do
+            local toolCfg = Config.DoorReinforcement.BreachingTool
+            if DistanceToTrapHouse(breach.src, trapHouseId) > toolCfg.MaxRangeMeters then
+                CancelBreach(trapHouseId, 'moved_away')
+            elseif CountPlayerItem(breach.src, toolCfg.ItemName) < 1 then
+                CancelBreach(trapHouseId, 'tool_lost')
+            elseif (now - breach.started_at) >= breach.duration then
+                CompleteBreach(trapHouseId)
+            end
+        end
+    end
+end)
+
+
+AddEventHandler('playerDropped', function()
+    local src = source
+    for trapHouseId, breach in pairs(ActiveBreaches) do
+        if breach.src == src then CancelBreach(trapHouseId, 'disconnected') end
     end
 end)
 
@@ -304,3 +501,98 @@ end, false)
 exports('GetDoorReinforcementLevel', function(trapHouseId) return Matrix.DoorReinforcement.GetLevel(trapHouseId) end)
 exports('GetBreachDelaySeconds', function(trapHouseId) return Matrix.DoorReinforcement.GetBreachDelaySeconds(trapHouseId) end)
 exports('InstallDoorReinforcement', function(src, trapHouseId, targetLevel) return Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel) end)
+
+
+-- =====================================================================
+-- ★★★ QBOX GENEL MAĞAZASINDAN SATIN ALMA (ox_inventory KULLANILABİLİR EŞYA) ★★★
+-- Kapı Sürgü Tahkimatı artık F10 dialogunun yanı sıra qbx_core'un
+-- kendi genel mağazasından (ox_inventory shop) da satın alınabilir --
+-- ödeme mağazadan alınırken zaten yapıldığı için Install burada
+-- skipCharge=true ile çağrılır (çift ödeme YOK).
+--
+-- ★ KURULUM (server owner tarafından, bu resource'un DIŞINDA):
+--   1) ox_inventory/data/items.lua'ya şu üç kalemi ekleyin:
+--        ['kapi_tahkimat_seviye1'] = { label = 'Kapı Tahkimat Kiti (Seviye 1)', weight = 5000, stack = true, close = true }
+--        ['kapi_tahkimat_seviye2'] = { label = 'Kapı Tahkimat Kiti (Seviye 2)', weight = 8000, stack = true, close = true }
+--        ['kapi_tahkimat_seviye3'] = { label = 'Kapı Tahkimat Kiti (Seviye 3)', weight = 12000, stack = true, close = true }
+--   2) qbx_core/ox_inventory'nin genel mağaza tanımına (data/shops.lua veya
+--      qbx_core shop config'i) bu üç item'ı Config.DoorReinforcement.Levels[n].price
+--      İLE AYNI fiyattan (8000/22000/45000) satılacak şekilde ekleyin.
+--   3) Bu dosya, item KULLANILDIĞINDA (ox_inventory'nin 'usingItem' export
+--      çağrısı) devreye girer -- AŞAĞIDAKİ exports(itemName, ...) bloklarını
+--      DOKUNMADAN bırakın.
+--
+-- ★ ox_inventory SÜRÜM NOTU (composer_intro.lua'daki xsound yorumuyla AYNI
+-- disiplin): export imzası ("usingItem" event adı, argüman sırası)
+-- ox_inventory forkuna/sürümüne göre DEĞİŞEBİLİR. Bu yüzden TÜM gövde
+-- pcall içindedir -- yanlış imza sessizce hiçbir şey yapmaz, ÇÖKMEZ.
+-- Kurulumdan sonra oyun içinde /tahkimatdurum ile doğrulayın; eşya
+-- tüketilip seviye değişmiyorsa, kurulu ox_inventory sürümünüzün
+-- "usingItem" export sözleşmesini (bkz. ox_inventory dokümantasyonu)
+-- kontrol edin.
+-- =====================================================================
+local function FindNearestTrapHouseToPed(src, maxDistance)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    local okCoords, coords = pcall(GetEntityCoords, ped)
+    if not okCoords or not coords then return nil end
+
+    local bestId, bestDist = nil, maxDistance
+    for id, house in pairs(Matrix.TrapHouses or {}) do
+        if house.coords then
+            local dx, dy, dz = coords.x - house.coords.x, coords.y - house.coords.y, coords.z - house.coords.z
+            local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if d <= bestDist then bestId, bestDist = id, d end
+        end
+    end
+    return bestId
+end
+
+local function HandleDoorReinforcementItemUse(level, src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+
+    local maxDist = Config.DoorReinforcement.ItemUseMaxDistanceMeters or 15.0
+    local trapHouseId = FindNearestTrapHouseToPed(src, maxDist)
+    if not trapHouseId then
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            ('Yakinda (%.0fm icinde) bir trap house yok.'):format(maxDist))
+        return false
+    end
+
+    local ok, resultOrReason = Matrix.DoorReinforcement.Install(src, trapHouseId, level, true)
+    if not ok then
+        local messages = {
+            bad_trap_house            = 'Gecersiz trap house.',
+            no_authority              = 'Bu islemi yapmak icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).',
+            must_upgrade_sequentially = 'Tahkimat yalnizca bir ust seviyeye sirayla yukseltilebilir -- once bir onceki seviyeyi kurun.'
+        }
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            messages[resultOrReason] or ('Kurulum basarisiz: %s'):format(tostring(resultOrReason)))
+        return false -- ★ item TUKETILMEZ -- oyuncu esyayi kaybetmez.
+    end
+
+    TriggerClientEvent('matrix:client:actionNotify', src, true,
+        ('%s monte edildi (Trap #%d). Magazadan satin alindi.'):format(resultOrReason.label, trapHouseId))
+    return true -- ★ item BURADA tuketilir (asagidaki pcall govdesi).
+end
+
+for level, cfg in pairs(Config.DoorReinforcement.Levels) do
+    if cfg.item_name then
+        local itemName = cfg.item_name
+        local thisLevel = level
+        pcall(function()
+            exports(itemName, function(event, item, inventory, slot, data)
+                if event ~= 'usingItem' then return end
+                local src = inventory and inventory.id
+                if type(src) ~= 'number' then return end
+
+                local consumed = HandleDoorReinforcementItemUse(thisLevel, src)
+                if consumed then
+                    pcall(function()
+                        exports['ox_inventory']:RemoveItem(src, itemName, 1, nil, slot)
+                    end)
+                end
+            end)
+        end)
+    end
+end

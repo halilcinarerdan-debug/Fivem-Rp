@@ -196,6 +196,37 @@ Config.BotPedConfiguration = {
 
 
 -- =====================================================================
+-- ★ TRAFİK YOĞUNLUĞUNA BAĞLI DİNAMİK SÜRAT MOTORU
+-- GTA V'de "GetVehicleDensityMultiplier" GİBİ bir GETTER native'i YOKTUR
+-- (yalnızca SET_VEHICLE_DENSITY_MULTIPLIER_THIS_FRAME gibi setter'lar
+-- vardır ve bunlar yereldeki popülasyon SPAWN oranını etkiler; FXServer'da
+-- sunucu tarafında "şu an bu koordinatta ne kadar trafik var" diye
+-- OKUNABİLECEK bir API değildir). Bu yüzden gerçek, ağda var olan araç
+-- sayısını (GetVehicles() — OneSync-farkında, sunucu tarafında güvenilir
+-- bir native) örneklem yarıçapında sayarak DETERMİNİSTİK bir yoğunluk
+-- katsayısı türetiyoruz (server/logistics.lua ComputeNearbyVehicleDensity,
+-- server/hitsquad.lua ComputePursuitSpeedMultiplier) — math.random YOK.
+-- =====================================================================
+Config.Traffic = {
+    SampleRadius               = 40.0,  -- metre: yogunluk orneklemesi bu yaricapta sayilir
+    DensitySaturationCount     = 12,    -- bu sayida veya daha fazla arac -> maksimum tikaniklik (1.0)
+
+    -- Sivil/kurye (dealer, runner) botlari: yogun trafikte surtunmeye
+    -- eklenen EK katsayi (frictionDivisor'a dogrudan toplanir -- degeri
+    -- ne kadar yuksekse o kadar yavaslarlar).
+    CivilianTrafficFrictionMax = 1.60,
+
+    -- Büro (hitsquad) pusu/takip araçları: aynı yoğunluk sinyaline karşı
+    -- MAKSIMUM hiz cezasi (sivilden AYRI olcek, carpansal -- 1.0 = ceza yok).
+    PursuitTrafficPenaltyMax   = 0.45,
+    -- Büro baskısı arttıkça (agresiflik) bu cezanın ne kadarı YOK SAYILIR
+    -- (0.0 = sivil ile aynı ceza, 1.0 = trafik onu HİÇ yavaşlatmaz).
+    BureauAggressionFactor     = 0.65,
+    PursuitMinSpeedMultiplier  = 0.55
+}
+
+
+-- =====================================================================
 -- Katman 4: Programli Lojistik Sevk & Zaman-Mesafe Surtunme Motoru
 -- =====================================================================
 Config.Logistics = {
@@ -429,6 +460,10 @@ Config.Undercover = {
 -- =====================================================================
 Config.Hud = {
     ToggleKey            = 'F6',
+    -- ★ [F10 FAIL-SAFE] Taktik Komuta Menüsü'nü açan tuş. Önceki sürümde bu
+    -- menü hiçbir RegisterKeyMapping'e bağlanmamıştı (bkz. client/hud.lua
+    -- OpenMainTacticalMenu) -- F10 hiçbir şey açmıyordu.
+    MenuKey              = 'F10',
     MaxBotIdInputValue   = 999999,
     MaxPlateInputLength  = 32,
     MaxHudLines          = 64,
@@ -792,11 +827,36 @@ Config.PackagingRoom = {
 -- ---------------------------------------------------------------------
 Config.DoorReinforcement = {
     MaxLevel = 3,
+    -- item_name: qbx/ox_inventory genel mağazasından satın alınan, KULLANILDIĞINDA
+    -- (bkz. server/door_reinforcement.lua exports(item_name, ...)) bu seviyeyi
+    -- en yakın trap house'a kuran esya. Magaza fiyati = price (asagida) --
+    -- kullanildiginda AYRICA ChargeCash CAGRILMAZ (cift odeme olmasin diye);
+    -- odeme ZATEN magazadan satin alirken alinmis olur.
     Levels = {
-        [0] = { label = 'Takviyesiz Eski Ahşap Kapı',      price = 0,     breach_bonus_seconds = 0   },
-        [1] = { label = 'Takviyeli Ahşap Sürgü',           price = 8000,  breach_bonus_seconds = 60  },
-        [2] = { label = 'Çelik Sürgü Barikatı',            price = 22000, breach_bonus_seconds = 150 },
-        [3] = { label = 'Çift Katlı Çelik Barikat (Maks)', price = 45000, breach_bonus_seconds = 220 }
+        [0] = { label = 'Takviyesiz Eski Ahşap Kapı',      price = 0,     breach_bonus_seconds = 0,   item_name = nil },
+        [1] = { label = 'Takviyeli Ahşap Sürgü',           price = 8000,  breach_bonus_seconds = 60,  item_name = 'kapi_tahkimat_seviye1' },
+        [2] = { label = 'Çelik Sürgü Barikatı',            price = 22000, breach_bonus_seconds = 150, item_name = 'kapi_tahkimat_seviye2' },
+        [3] = { label = 'Çift Katlı Çelik Barikat (Maks)', price = 45000, breach_bonus_seconds = 220, item_name = 'kapi_tahkimat_seviye3' }
+    },
+    -- Item kullanildiginda trap house'un OTOMATIK cozulmesi icin gereken
+    -- maksimum mesafe (metre) -- F10 dialogunun manuel ID girisine ALTERNATIF,
+    -- magaza-esyasi akisi ICIN.
+    ItemUseMaxDistanceMeters = 15.0,
+
+    -- ★ DÜŞMAN TRAP HOUSE KAPI KIRMA DONANIMI: sunucu-otoriteli, fiziksel
+    -- olarak elde tutulan (ox_inventory'den DOĞRULANAN) bir alet üzerinden
+    -- çalışır. Örgüt üyeliği/hiyerarşi ARANMAZ — bu bilinçli olarak
+    -- "dışarıdan" (rakip oyuncu/polis baskını) bir eylemdir; Install
+    -- (yukarıdaki Levels) ise SADECE örgüt otoritesiyle çalışan savunma
+    -- tarafıdır. Süre seviyeyle ARTAR (daha yüksek barikat = daha uzun
+    -- kırma süresi) — RNG YOK, tamamen deterministik.
+    BreachingTool = {
+        ItemName              = 'hydraulic_pry_bar', -- ox_inventory item adi
+        MaxRangeMeters        = 3.0,                 -- server-otoriteli mesafe kontrolu
+        BaseSeconds           = 12,
+        PerLevelSecondsBonus  = 18,
+        LevelsBypassedOnBreach = 1,   -- basarili kirma DoorLevel'i bu kadar DUSURUR
+        RecheckIntervalMs     = 1000  -- ilerleme her bu araliktan bir DOGRULANIR (mesafe/item/varlik)
     }
 }
 
@@ -862,13 +922,18 @@ Config.DistrictHubs = {
 -- kesilirse veya apiKey boşsa sistem otomatik olarak yerel sıfır-RNG
 -- şablonlarına düşer, resmon 0'da kalır (yeni bir thread AÇILMAZ, mevcut
 -- [T4] tick'inin periyoduna eklenir).
-Config.AI_Matrix_Brain = {
-    enabled                 = false,
-    provider                = 'openai',
-    apiKey                  = 'sk-...',
-    analysisIntervalMinutes = 60,
-    fallbackToDeterministic = true
-}
+--
+-- ★★★ [SEC] TAŞINDI — Config.AI_Matrix_Brain ARTIK BU DOSYADA DEĞİL ★★★
+-- ADLİ BULGU: Bu dosya (shared/config.lua) fxmanifest.lua'da bir
+-- `shared_scripts` girdisidir -- yani FiveM bunu SUNUCUYA VE HER BAĞLI
+-- CLIENT'A gönderir. apiKey buradayken, herhangi bir oyuncu (bir Lua
+-- Executor/hile menüsüyle, hatta yalnızca client kaynak önbelleğini
+-- inceleyerek) GERÇEK OpenAI API anahtarını doğrudan okuyabilirdi --
+-- pcall/try-catch bunu KAPATAMAZ, çünkü sorun bir çalışma-zamanı hatası
+-- değil, sırrın YANLIŞ DOSYADA tanımlanmasıdır. Tanım artık YALNIZCA
+-- server_scripts içinde yüklenen server/config_secrets.lua'dadır (bkz.
+-- fxmanifest.lua) -- clientlar bu tabloyu HİÇ GÖRMEZ.
+-- =====================================================================
 
 
 -- =====================================================================
@@ -1330,7 +1395,40 @@ Config.GangHoods = {
     -- KOSULMADAN yakalanirsa (Frisk, MEVCUT Config.Forensics.Frisk)
     -- tasiyicinin AKTIF davasina (MEVCUT /davaac -> matrix_trial_records)
     -- %100 Mahkumiyet Skoru olarak islenir.
-    FrameUpMetadataTag           = '[ORIGIN: BLOODY LOOT]'
+    FrameUpMetadataTag           = '[ORIGIN: BLOODY LOOT]',
+
+    -- ★ OPENAI DÜŞMAN ÇETE ALDATMA (DARKCHAT DEZENFORMASYON KÖPRÜSÜ)
+    -- Mevcut TEK OpenAI entegrasyonu (server/bureau.lua Config.AI_Matrix_Brain,
+    -- server-only, bkz. server/config_secrets.lua) burada TEKRAR
+    -- KULLANILIR -- ikinci bir API anahtari/entegrasyonu ICAT EDILMEZ.
+    -- AI kapali/basarisizsa deterministik anahtar-kelime skoru fallback
+    -- olarak calisir (asagidaki BaseCredibilityKeywords) -- Buro'nun
+    -- kendi karar mekanizmalari gibi bu da ASLA AI'a bagimli KALMAZ.
+    Deception = {
+        Enabled                    = true,
+        MessageMaxLength           = 280,
+        CooldownSeconds            = 120,  -- ayni oyuncu + ayni mahalle icin
+        BaseCredibilityKeywords    = {
+            'baskin', 'tuzak', 'ihbar', 'pusu', 'polis', 'itiraf', 'yakalandik', 'firar', 'rehin', 'ajan'
+        },
+        BaseCredibilityThreshold   = 0.34,
+        AggressionDecayRate        = 0.6,  -- math.exp(-rate * (skor-esik) * 10) ile PatrolMultiplier'a uygulanir
+        MinAggressionMultiplier    = 1.0
+    }
+}
+
+-- ★ SİVİL MUHBİR / MASKE ENTEGRASYONU
+-- GTA V'de "GetPedDensityMultiplier" gibi bir GETTER native'i YOKTUR
+-- (server/logistics.lua'daki GetVehicleDensityMultiplier yorumuyla AYNI
+-- sinirlama) -- gercek, agda var olan sivil (ped) sayisini GetPeds() ile
+-- orneklem yaricapinda sayariz. Maske kontrolu GTA V'in gercek prop
+-- sistemi uzerinden yapilir: slot 1 = "Mask" prop kategorisi;
+-- GetPedPropIndex(ped, 1) == -1 ise maske YOK demektir.
+Config.Witness = {
+    SampleRadius                    = 30.0,
+    MaskPropSlot                    = 1,
+    BureauIntensitySpikeMultiplier  = 2.0,  -- matrix_bureau_intensity ConVar'i (bureau.lua/logistics.lua/wound_system.lua ILE AYNI ConVar)
+    HitSquadDispatchOnMasked        = true
 }
 
 -- =====================================================================
