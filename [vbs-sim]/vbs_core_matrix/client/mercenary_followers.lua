@@ -13,6 +13,25 @@
 -- yenileme (kisa Wait) daha sik calisir, o da yalnizca aktif catisma
 -- aninda.
 --
+-- ★ [MODUL 1] ANTI-DUPE FIX: bu client artik KENDI ped'ini uretmiyor.
+-- Sunucu, oyuncunun zaten sahip oldugu (handler_citizenid) ve 'idle' olan
+-- KALICI bot kaydini Matrix.SpawnBot ile networked bir entity olarak
+-- doguruyor; client sadece o netId'yi NetworkGetEntityFromNetworkId ile
+-- COZUP uzerine takip/muharebe davranisi bindiriyor. Dismiss'te entity
+-- SILINMEZ -- sunucu Matrix.DespawnBot ile geri cekip ajani 'idle'ye
+-- dondurur, boylece ayni kimlik bir sonraki cagrida tekrar kullanilabilir.
+--
+-- ★ [MODUL 3] Config.BlackMarket.CombatByWeaponClass (shared/config.lua)
+-- rifle tasiyan botlarin siper alip mesafeden angaje olmasini, shotgun
+-- tasiyanlarin yakin mesafeye itilmesini tanimlar.
+--
+-- ★ [MODUL 10] F10 -> bilinen hitsquad ambush araci/surucusu sizdiginda
+-- server/hitsquad.lua 'matrix:client:hitsquad:squadSpotted' ile bildirir;
+-- takipciler generic combat-state'in tetiklenmesini BEKLEMEDEN ona angaje
+-- olabilir. Followers roster'i degistiginde guncel network id listesi
+-- sunucuya bildirilir (server/hitsquad.lua'nin kolektif hedef havuzu bunu
+-- okur).
+--
 -- ★ [MODUL 11] F10 -> "Muhafiz Taktik Modu" (hold / guard / observe /
 -- follow) -- bkz. 'muhafiztaktik' komutu asagida. Bir takipci hold/guard/
 -- observe moduna atandiginda, entry.state.last_assigned_coords'a (emrin
@@ -30,7 +49,7 @@
 if not Config.Mercenary or not Config.Mercenary.EnablePhysicalFollowers then return end
 
 
-local Followers = {} -- [i] = { ped = handle, entering = bool }
+local Followers = {} -- [i] = { ped = handle, botId = number, entering = bool, state = {...} }
 
 -- ★ [MODUL 10] su an bilinen dusman hitsquad ped'leri (server/hitsquad.lua
 -- 'matrix:client:hitsquad:squadSpotted' ile bildirir) -- [driverNetId] = true.
@@ -57,66 +76,74 @@ local function ReportFollowerNetIds()
 end
 
 
-local function DeleteFollower(entry)
-    if entry and entry.ped and DoesEntityExist(entry.ped) then
-        SetEntityAsNoLongerNeeded(entry.ped)
-        if DoesEntityExist(entry.ped) then
-            DeletePed(entry.ped)
-        end
-    end
-end
-
-
-local function SpawnFollowerPed(coords)
-    local model = GetHashKey(Config.Mercenary.PedModel or 'g_m_y_mexgoon_02')
-    RequestModel(model)
+-- ★ [MODUL 1] ANTI-DUPE: entity BURADA yaratilmaz -- sunucu Matrix.SpawnBot
+-- ile zaten networked olarak doguruyor; client sadece netId cozulene kadar
+-- bekler.
+local function AwaitNetworkEntity(netId, timeoutMs)
     local waited = 0
-    while not HasModelLoaded(model) and waited < 3000 do
+    while not NetworkDoesEntityExistWithNetworkId(netId) and waited < (timeoutMs or 3000) do
         Wait(50)
         waited = waited + 50
     end
-    if not HasModelLoaded(model) then return nil end
+    if not NetworkDoesEntityExistWithNetworkId(netId) then return nil end
+    local ped = NetworkGetEntityFromNetworkId(netId)
+    if not ped or ped == 0 or not DoesEntityExist(ped) then return nil end
+    return ped
+end
 
-    local ped = CreatePed(4, model, coords.x, coords.y, coords.z, 0.0, true, true)
-    if not DoesEntityExist(ped) then
-        SetModelAsNoLongerNeeded(model)
-        return nil
-    end
 
-    -- [DÜZELTME] 'SetEntityOrphanMode' CLIENT tarafında tanımsızdır (server-only
-    -- native) -- doğrudan çağrısı nil upvalue/global çağrısı olarak çöker. Her
-    -- FXServer sürümünde çalışan client-safe eşdeğeri: ped'i mission entity
-    -- olarak işaretlemek (garbage-collect edilmesin) + temizlikte
-    -- SetEntityAsNoLongerNeeded/DeletePed ile bırakmak.
-    SetEntityAsMissionEntity(ped, true, true)
+-- =====================================================================
+-- ★ MODUL 3: SILAH SINIFINA GORE MUHAREBE DAVRANISI
+-- Item adi -> class eslesmesi Config.BlackMarket.Weapons katalogundan
+-- (server tarafinda zaten var olan FindWeaponClassByItem ile AYNI veri)
+-- client tarafinda kendi kopyasi ile cozulur (Config paylasilir,
+-- shared/config.lua).
+-- =====================================================================
+local WeaponHashToClass = {}
+for _, w in ipairs(Config.BlackMarket.Weapons or {}) do
+    WeaponHashToClass[GetHashKey(w.item)] = w.class
+end
+
+local function ApplyWeaponClassCombatBehavior(ped)
+    local currentHash = GetSelectedPedWeapon(ped)
+    local class = WeaponHashToClass[currentHash]
+    local rule = class and Config.BlackMarket.CombatByWeaponClass and Config.BlackMarket.CombatByWeaponClass[class]
+    if not rule then return end
+
+    SetPedCombatRange(ped, rule.combat_range)
+    SetPedCombatAttributes(ped, 0, rule.use_cover == true) -- BF_CanUseCover
+end
+
+
+local function ApplyFollowerCombatSetup(ped)
     SetPedFleeAttributes(ped, 0, false)
     SetPedCombatAttributes(ped, 46, true) -- BF_CanFightArmedPedsWhenNotArmed benzeri saldirganlik izni
     SetPedCombatAbility(ped, 2)
     SetPedCombatRange(ped, 2)
     SetPedAccuracy(ped, 65)
-    GiveWeaponToPed(ped, GetHashKey('WEAPON_COMBATPISTOL'), 250, false, true)
     SetPedAsGroupMember(ped, GetPlayerGroup(PlayerId()))
     SetPedRelationshipGroupHash(ped, GetHashKey('PLAYER'))
-    SetModelAsNoLongerNeeded(model)
-
-    return ped
+    ApplyWeaponClassCombatBehavior(ped)
 end
 
 
-RegisterNetEvent('matrix:client:mercenary:summonApproved', function(newCount)
-    local playerPed = PlayerPedId()
-    local baseCoords = GetEntityCoords(playerPed)
-    local heading    = GetEntityHeading(playerPed)
-    local offset     = (#Followers + 1) * (Config.Mercenary.SummonRadius or 3.0)
-    local spawnCoords = GetOffsetFromEntityInWorldCoords(playerPed, (Followers[1] and 1.0 or -1.0), -offset, 0.0)
-
-    local ped = SpawnFollowerPed(spawnCoords)
-    if not ped then
+RegisterNetEvent('matrix:client:mercenary:summonApproved', function(newCount, botId, netId)
+    if type(netId) ~= 'number' then
         if lib and lib.notify then
-            lib.notify({ title = '[MUHAFIZ]', description = 'Takipci doğurulamadi (model yuklenemedi).', type = 'error' })
+            lib.notify({ title = '[MUHAFIZ]', description = 'Ajan entity referansi alinamadi.', type = 'error' })
         end
         return
     end
+
+    local ped = AwaitNetworkEntity(netId)
+    if not ped then
+        if lib and lib.notify then
+            lib.notify({ title = '[MUHAFIZ]', description = 'Ajan sahaya inemedi (network senkron zaman asimi).', type = 'error' })
+        end
+        return
+    end
+
+    ApplyFollowerCombatSetup(ped)
 
     -- ★ [MODUL 11] entry.state: hold/guard/observe taktik modu takibi --
     -- current_task_mode ('follow' varsayilan), last_assigned_coords/
@@ -125,6 +152,7 @@ RegisterNetEvent('matrix:client:mercenary:summonApproved', function(newCount)
     -- refresh dongusu ayni ankraj icin gorevi TEKRAR YAYINLAMAZ).
     Followers[#Followers + 1] = {
         ped = ped,
+        botId = botId,
         entering = false,
         state = {
             current_task_mode    = 'follow',
@@ -142,9 +170,8 @@ end)
 
 
 local function DismissAllFollowers()
-    for _, entry in ipairs(Followers) do
-        DeleteFollower(entry)
-    end
+    -- ★ Entity'ler BURADA SILINMEZ -- sunucu Matrix.DespawnBot ile bu
+    -- kalici kimlikleri kendisi geri cekip 'idle'ye dondurur.
     Followers = {}
     TriggerServerEvent('matrix:server:mercenary:reportDismiss', 0)
     ReportFollowerNetIds()
@@ -368,11 +395,18 @@ CreateThread(function()
                 if not entry.ped or not DoesEntityExist(entry.ped) then
                     table.remove(Followers, i)
                 elseif IsEntityDead(entry.ped) then
-                    DeleteFollower(entry)
+                    -- ★ [MODUL 1] Entity'nin kendisi silinmez (sunucu
+                    -- Matrix.DespawnBot ile yonetir) -- sadece client
+                    -- tarafi listeden dusuruluyor.
                     table.remove(Followers, i)
                     TriggerServerEvent('matrix:server:mercenary:reportDismiss', #Followers)
                     ReportFollowerNetIds()
                 else
+                    -- ★ MODUL 3: silah degisebilir (ornegin /silahmodtak
+                    -- sonrasi) -- her onbellek turunda davranis yeniden
+                    -- degerlendirilir (pahali degil, 1500ms'de bir).
+                    ApplyWeaponClassCombatBehavior(entry.ped)
+
                     entry.state = entry.state or { current_task_mode = 'follow', anchored = false }
                     local followerCoords = GetEntityCoords(entry.ped)
                     local dist = #(followerCoords - playerCoords)
@@ -443,8 +477,7 @@ end)
 
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then return end
-    for _, entry in ipairs(Followers) do
-        DeleteFollower(entry)
-    end
+    -- ★ [MODUL 1] Entity'ler sunucu tarafinin sorumlulugunda
+    -- (Matrix.DespawnBot); client yalnizca kendi listesini temizler.
     Followers = {}
 end)

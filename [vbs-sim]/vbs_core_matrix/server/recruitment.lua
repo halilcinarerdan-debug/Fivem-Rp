@@ -278,6 +278,9 @@ function Matrix.Recruitment.Promote(candidate)
     local bot = Matrix.CreateBotRecord({
         name              = candidate.name,
         role              = 'dealer',
+        -- ★ MODUL 1 (ANTI-DUPE): devsirilen ajan citizenid'e sahiplendirilir
+        -- -- /muhafizcagir SADECE bu sahiplik uzerinden havuzdan cekebilir.
+        handler_citizenid = candidate.citizenid,
         fear_factor       = candidate.psychology.fear_factor,
         resilience        = candidate.psychology.resilience,
         snitch_tendency   = candidate.psychology.snitch_tendency,
