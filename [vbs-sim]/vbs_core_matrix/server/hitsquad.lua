@@ -33,6 +33,7 @@ local SetEntityOrphanMode        = SetEntityOrphanMode
 local SetEntityRoutingBucket     = SetEntityRoutingBucket
 local GiveWeaponToPed            = GiveWeaponToPed
 local SetPedCombatAttributes     = SetPedCombatAttributes
+local GetVehicles                = GetVehicles
 
 
 -- Aktif takip/saldırı durumu: src -> { vehicle, driver, phase,
@@ -86,6 +87,61 @@ local function ComputeTraceLevel(coords)
 end
 
 
+-- =====================================================================
+-- ★ TRAFİK YOĞUNLUĞUNA BAĞLI DİNAMİK SÜRAT — Config.Traffic (shared/config.lua)
+-- server/logistics.lua ComputeNearbyVehicleCount İLE AYNI yöntem (gerçek
+-- GetVehicles() örneklemesi; GetVehicleDensityMultiplier gibi bir GETTER
+-- native'i YOKTUR -- bkz. o dosyadaki yorum). İKİNCİ bir örnekleme
+-- fonksiyonu İCAT EDİLMEZ diye Matrix.Logistics.ComputeTrafficDensityRatio
+-- (varsa) ÖNCELİKLE tercih edilir; yoksa (yükleme sırası garantisizse)
+-- yerel bir pcall'lı fallback kullanılır -- HER İKİ durumda da fail-open
+-- (yoğunluk okunamazsa ceza YOK, takip ASLA kilitlenmez).
+-- =====================================================================
+local function LocalComputeTrafficDensityRatio(coords)
+    if Matrix.Logistics and Matrix.Logistics.ComputeTrafficDensityRatio then
+        local ok, ratio = pcall(Matrix.Logistics.ComputeTrafficDensityRatio, coords)
+        if ok and type(ratio) == 'number' then return ratio end
+    end
+
+    local ok, vehicles = pcall(GetVehicles)
+    if not ok or type(vehicles) ~= 'table' then return 0.0 end
+
+    local radius     = (Config.Traffic and Config.Traffic.SampleRadius) or 40.0
+    local radiusSq   = radius * radius
+    local saturation = (Config.Traffic and Config.Traffic.DensitySaturationCount) or 12
+    local count = 0
+    for i = 1, #vehicles do
+        local veh = vehicles[i]
+        if veh and veh ~= 0 and DoesEntityExist(veh) then
+            local okCoords, vCoords = pcall(GetEntityCoords, veh)
+            if okCoords and vCoords then
+                local dx, dy, dz = vCoords.x - coords.x, vCoords.y - coords.y, vCoords.z - coords.z
+                if (dx * dx + dy * dy + dz * dz) <= radiusSq then count = count + 1 end
+            end
+        end
+    end
+    if saturation <= 0 then return 0.0 end
+    return Matrix.Clamp(count / saturation, 0.0, 1.0)
+end
+
+--- Büro/hitsquad pusu araçları: aynı trafik yoğunluğuna karşı sivil
+--- sevkiyatlardan (Config.Traffic.CivilianTrafficFrictionMax) DAHA AZ
+--- etkilenir -- "Büro baskısı agresifliği artırsın" isteği burada
+--- BureauAggressionFactor ile cezanın bir kısmını YOK SAYAR (deterministik,
+--- RNG yok). Dönüş [PursuitMinSpeedMultiplier, 1.0] aralığında bir çarpandır.
+local function ComputePursuitSpeedMultiplier(coords)
+    local cfg = Config.Traffic
+    if not cfg then return 1.0 end
+
+    local density        = LocalComputeTrafficDensityRatio(coords)
+    local penaltyMax      = cfg.PursuitTrafficPenaltyMax or 0.0
+    local aggressionFactor = Matrix.Clamp(cfg.BureauAggressionFactor or 0.0, 0.0, 1.0)
+    local penalty         = density * penaltyMax * (1.0 - aggressionFactor)
+
+    return Matrix.Clamp(1.0 - penalty, cfg.PursuitMinSpeedMultiplier or 0.5, 1.0)
+end
+
+
 local function DespawnSquad(src, reason)
     local squad = activeSquads[src]
     if not squad then return end
@@ -124,6 +180,62 @@ end
 
 
 -- =====================================================================
+-- ★ SİVİL MUHBİR ENTEGRASYONU: server/bureau.lua Matrix.Bureau.
+-- WitnessBotElimination, maskeli bir failin kimliği ÇÖZÜLEMEDİĞİNDE
+-- (UNKNOWN-MASKED-SUBJECT) belirli bir oyuncuyu değil, DOĞRUDAN bir
+-- BÖLGEYİ hedef alan asenkron bir sevkiyat ister. Mevcut per-player
+-- takip faz-makinesi (activeSquads[src]) DEĞİŞTİRİLMEZ -- bu fonksiyon
+-- yalnızca o bölgeye EN YAKIN bağlı oyuncuyu bulup AYNI spawn/pursuit
+-- mekanizmasını o oyuncu için başlatır (kimin gerçekte orada olduğunu
+-- sunucu zaten biliyor; "bölgeye sevk" pratikte budur).
+-- =====================================================================
+function Matrix.HitSquad.DispatchToNearestPlayer(coords, reason)
+    if not coords then return false end
+
+    local bestSrc, bestDist = nil, math_huge
+    for _, srcStr in ipairs(GetPlayers()) do
+        local s = tonumber(srcStr)
+        if s then
+            local ped = GetPlayerPed(s)
+            if ped and ped ~= 0 then
+                local okCoords, pedCoords = pcall(GetEntityCoords, ped)
+                if okCoords and pedCoords then
+                    local d = #(coords - pedCoords)
+                    if d < bestDist then bestDist, bestSrc = d, s end
+                end
+            end
+        end
+    end
+
+    if not bestSrc or activeSquads[bestSrc] then return false end
+
+    local hood = FindNearestHood(coords)
+    if not hood then return false end
+
+    local vehicle, driver = SpawnSquadVehicle(hood)
+    if not (vehicle and driver) then return false end
+
+    activeSquads[bestSrc] = {
+        vehicle = vehicle, driver = driver,
+        phase = 'pursuing', phase_started_at = Matrix.Now(),
+        hood = hood
+    }
+    pcall(TaskVehicleDriveToCoord, driver, vehicle, coords.x, coords.y, coords.z,
+        Config.HitSquad.CruiseSpeed * ComputePursuitSpeedMultiplier(coords), 0,
+        GetHashKey(Config.HitSquad.VehicleModel), Config.HitSquad.AggressiveDriveStyle, 5.0, 1)
+
+    Matrix.Log('HITSQUAD',
+        '[MUHBIR SEVK] src=%d (bolgeye en yakin oyuncu, mesafe=%.1fm) sebep=%s -> "%s" cetesi sevk edildi.',
+        bestSrc, bestDist, tostring(reason), hood.label)
+    return true
+end
+
+exports('DispatchHitSquadToRegion', function(coords, reason)
+    return Matrix.HitSquad.DispatchToNearestPlayer(coords, reason)
+end)
+
+
+-- =====================================================================
 -- TAKİP/SALDIRI FAZ MAKİNESİ — mesafe/hedefleme her tick DEĞİL, main.lua'
 -- nın bureauAccumulator deseniyle AYNI TARZDA sabit bir aralıkta taranır
 -- (Config.HitSquad.ScanIntervalTicks * Config.Tick.IntervalMs).
@@ -150,7 +262,8 @@ local function TickPlayer(src)
             hood = hood
         }
         pcall(TaskVehicleDriveToCoord, driver, vehicle, coords.x, coords.y, coords.z,
-            Config.HitSquad.CruiseSpeed, 0, GetHashKey(Config.HitSquad.VehicleModel),
+            Config.HitSquad.CruiseSpeed * ComputePursuitSpeedMultiplier(coords), 0,
+            GetHashKey(Config.HitSquad.VehicleModel),
             Config.HitSquad.AggressiveDriveStyle, 5.0, 1)
 
         Matrix.Log('HITSQUAD', 'src=%s iz=%.3f (esik:%.2f) -> "%s" cetesi sizdirildi.',
@@ -184,7 +297,8 @@ local function TickPlayer(src)
             end
         else
             pcall(TaskVehicleDriveToCoord, squad.driver, squad.vehicle, coords.x, coords.y, coords.z,
-                Config.HitSquad.CruiseSpeed, 0, GetHashKey(Config.HitSquad.VehicleModel),
+                Config.HitSquad.CruiseSpeed * ComputePursuitSpeedMultiplier(coords), 0,
+                GetHashKey(Config.HitSquad.VehicleModel),
                 Config.HitSquad.AggressiveDriveStyle, 5.0, 1)
         end
 
@@ -197,7 +311,8 @@ local function TickPlayer(src)
             if squad.hood then
                 pcall(TaskVehicleDriveToCoord, squad.driver, squad.vehicle,
                     squad.hood.coords.x, squad.hood.coords.y, squad.hood.coords.z,
-                    Config.HitSquad.CruiseSpeed * 1.4, 0, GetHashKey(Config.HitSquad.VehicleModel),
+                    Config.HitSquad.CruiseSpeed * 1.4 * ComputePursuitSpeedMultiplier(vehCoords), 0,
+                    GetHashKey(Config.HitSquad.VehicleModel),
                     Config.HitSquad.AggressiveDriveStyle, 5.0, 1)
             end
             Matrix.Log('HITSQUAD', 'src=%s "Hit-and-Run" -> en yakin mahalleye geri cekiliyor.', tostring(src))

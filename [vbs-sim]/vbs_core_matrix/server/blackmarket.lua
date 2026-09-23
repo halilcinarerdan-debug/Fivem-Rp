@@ -717,7 +717,7 @@ end)
 -- =====================================================================
 -- TAKTİK DEBUG PANELİ
 -- =====================================================================
-RegisterCommand('karaborsagecmisi', function(src, args)
+Matrix.Security.RegisterGatedCommand('karaborsagecmisi', function(src, args)
     local citizenid = args[1]
     if type(citizenid) ~= 'string' then Reply(src, 'Kullanim: /karaborsagecmisi [citizenid]'); return end
 
@@ -732,7 +732,7 @@ RegisterCommand('karaborsagecmisi', function(src, args)
     for _, row in ipairs(rows) do
         Reply(src, ('  [%s] %s | $%.0f | %s'):format(row.item_type, tostring(row.item_ref), row.price_paid, tostring(row.created_at)))
     end
-end, false)
+end)
 
 
 -- =====================================================================

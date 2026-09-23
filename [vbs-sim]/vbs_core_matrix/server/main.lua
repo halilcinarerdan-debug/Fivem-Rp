@@ -94,6 +94,15 @@ end
 
 function Matrix.Now() return os.time() end
 
+--- ★ F6/DEBUG PANELİ MİLSİM METİN STANDARDI: çiğ Lua boolean'ı ("true"/
+--- "false") hiçbir zaman doğrudan bir oyuncuya/konsola BASILMAZ. Bu tek
+--- merkezi formatlayıcı üzerinden askeri-üslup bir durum metnine çevrilir.
+--- trueText/falseText verilmezse jenerik "🚨 AKTİF" / "🟢 PASİF" kullanılır.
+function Matrix.FormatMilSimStatus(value, trueText, falseText)
+    if value then return trueText or '🚨 AKTİF' end
+    return falseText or '🟢 PASİF'
+end
+
 function Matrix.Inventory.GetSlotMetadata(inventoryId, slot)
     if not inventoryId or not slot then return {} end
     local ok, item = pcall(exports['ox_inventory'].GetSlot, exports['ox_inventory'], inventoryId, slot)
@@ -616,6 +625,19 @@ local function RefreshPoliceCache()
     PoliceSources = fresh
 end
 
+--- ★ [SEC] Tek doğruluk kaynağı: bir src'in GÖREVDE polis/şerif/LEO olup
+--- olmadığını CANLI (cache'e bağımlı olmadan) sorgular -- bureau.lua'nın
+--- polis-gated komutları (davaac/davasorgula/polisgenetigi) bunu kullanır.
+--- PoliceSources RAM önbelleği yalnızca performans-kritik dispatch tarama
+--- döngüsü içindir (5sn TTL) -- yetki kararları için CANLI veri tercih edilir.
+function Matrix.IsOnDutyPolice(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+    local ok, player = pcall(function() return Matrix.QBX:GetPlayer(src) end)
+    if not ok or not player or not player.PlayerData or not player.PlayerData.job then return false end
+    local job = player.PlayerData.job
+    return job.onduty and (job.name == 'police' or job.name == 'sheriff' or job.type == 'leo') or false
+end
+
 CreateThread(function()
     while true do
         Wait(5000)
@@ -973,7 +995,14 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
         exports['ox_inventory']:RegisterStash(stashId, stashLabel, 100, 200000)
     end)
 
-    local movedAny = false
+    local movedAny        = false
+    -- ★ [D1-v2] IO MÜHRÜ: bu bayrak yalnızca "hiç eşya yoktu" (no-op) ile
+    -- "bir eşya gerçekten kayboldu" (remove basarili + add basarisiz + telafi
+    -- de basarisiz, YA DA RemoveItem pcall'ı patladı) durumlarını AYIRT ETMEK
+    -- içindir. movedAny=false HER ZAMAN "güvenli" değildir -- bu yüzden
+    -- CompleteDispatch artık movedAny'ye değil, bu ikinci değere bakarak
+    -- is_locked=false kilidini açar.
+    local ioIntegrityIntact = true
     for slot, item in pairs(inv.items) do
         if type(item) == 'table' and type(item.name) == 'string' and (tonumber(item.count) or 0) > 0 then
             local itemName, itemCount, itemMeta = item.name, item.count, item.metadata
@@ -982,7 +1011,12 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
                 return exports['ox_inventory']:RemoveItem(inventoryId, itemName, itemCount, itemMeta, slot)
             end)
 
-            if removeOk and removed == true then
+            if not removeOk then
+                ioIntegrityIntact = false
+                Matrix.Log('CORE',
+                    '[KRITIK] DepositDealerCargoToTrapStash: Bot #%d, esya (%s x%s) RemoveItem pcall hatasi: %s',
+                    botId, tostring(itemName), tostring(itemCount), tostring(removed))
+            elseif removed == true then
                 local addOk, added = pcall(function()
                     return exports['ox_inventory']:AddItem(stashId, itemName, itemCount, itemMeta)
                 end)
@@ -994,12 +1028,15 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
                         return exports['ox_inventory']:AddItem(inventoryId, itemName, itemCount, itemMeta)
                     end)
                     if not (restoreOk and restored == true) then
+                        ioIntegrityIntact = false
                         Matrix.Log('CORE',
                             '[KRITIK] DepositDealerCargoToTrapStash: Bot #%d, esya (%s x%s) AddItem+telafi ikisi de basarisiz -- olasi kayip.',
                             botId, tostring(itemName), tostring(itemCount))
                     end
                 end
             end
+            -- removeOk==true and removed~=true: esya zaten kaynakta yok/RemoveItem
+            -- reddetti -- hicbir sey degismedi, bu bir IO basarisizligi DEGILDIR.
         end
     end
 
@@ -1008,7 +1045,12 @@ function Matrix.DepositDealerCargoToTrapStash(botId, trapHouseId)
             '[OTOMATIK TESLIMAT] Bot #%d yuku Trap House #%d deposuna (%s) aktarildi, kutle hafifledi.',
             botId, trapHouseId, stashId)
     end
-    return movedAny
+    -- ★ Boş kargo (pairs döngüsü hiç çalışmadı) → movedAny=false AMA
+    -- ioIntegrityIntact=true kalır: bu, mühürü aldatan sahte bir "true" değil,
+    -- gerçek bir no-op'un dürüst yansımasıdır. Çağıran (CompleteDispatch)
+    -- ikinci değeri kullanarak is_locked=false kararını SADECE fiili IO
+    -- tescili tamlığına bağlar.
+    return movedAny, ioIntegrityIntact
 end
 
 -- =====================================================================
@@ -1074,9 +1116,20 @@ function Matrix.CompleteDispatch(botId, reason)
 
             local nearestTrapId, nearestTrapDist = FindNearestTrapHouse(destination)
             if nearestTrapId and nearestTrapDist <= Config.Logistics.TrapHouseArrivalStashRadius then
-                _TrackIO(true, function()
-                    return Matrix.DepositDealerCargoToTrapStash(botId, nearestTrapId)
-                end)
+                -- ★ [D1-v2] _TrackIO(true, fn) tek dönüş değerine bakar ve
+                -- movedAny==false'u (boş kargo no-op) HER ZAMAN "başarılı"
+                -- sayardı -- bu, mühürü aldatan boşluktu. Burada ikinci
+                -- dönüş değerini (ioIntegrityIntact) DOĞRUDAN sayaca işleyip
+                -- gerçek bir kayıp/pcall hatasını IO FAIL olarak isaretliyoruz.
+                inventoryOpsTotal = inventoryOpsTotal + 1
+                local trackOk, _movedAny, ioIntegrityIntact = pcall(
+                    Matrix.DepositDealerCargoToTrapStash, botId, nearestTrapId)
+                if not trackOk or ioIntegrityIntact == false then
+                    inventoryOpsFailed = inventoryOpsFailed + 1
+                    Matrix.Log('CORE',
+                        '[D1-v2] IO op FAIL (trap-stash deposit): %s',
+                        tostring(not trackOk and _movedAny or 'esya kalici kayip -- ioIntegrityIntact=false'))
+                end
 
                 if Matrix.Market and Matrix.Market.FlushBotStreetCash then
                     _TrackIO(true, function()
@@ -1655,6 +1708,165 @@ local function NotifyResult(src, ok, msg)
     end
 end
 
+
+-- =====================================================================
+-- ★★★ [SANDBOX ACE HARDENING] Matrix.Security ★★★
+-- Sivil oyuncuların KENDİ oyun mantığı/RP döngüleri için kullandığı
+-- komutlar (ör. /telefonuyoket, /opsecparola) ile yalnızca sunucu
+-- yöneticilerinin debug/test/simülasyon süreçlerinde kullanması gereken
+-- komutlar (ör. /botyarat, /burokilitzorla, /radyoparazit, /rotaciz) ARASINDAKİ
+-- ayrımı TEK bir merkezi kapıdan geçirir. Her tehlikeli/debug RegisterCommand
+-- artık DOĞRUDAN değil, Matrix.Security.RegisterGatedCommand ÜZERİNDEN
+-- tanımlanır -- bu hem native restricted=true (FXServer'ın kendi
+-- 'command.<isim>' ACE kontrolü, Lua'ya HİÇ ULAŞMADAN reddeder) hem de
+-- Lua-seviyesi bağımsız bir ikinci katman (group.admin VEYA özel
+-- command.matrix_supervisor principal'ı) UYGULAR -- server.cfg'de
+-- per-command ACE tanımlamayan küçük sunucular için de çalışır (bkz.
+-- README.md "Sandbox Komutları" bölümü).
+-- =====================================================================
+Matrix.Security = Matrix.Security or {}
+
+local IsPlayerAceAllowed = IsPlayerAceAllowed
+
+-- name -> true: RegisterGatedCommand ÜZERİNDEN gerçekten kayıt edilmiş
+-- komutlar. matrix_diagnostics.lua'nın 'Sandbox: ACE Privilege Verification'
+-- kontrolü, DangerousCommands listesindeki HER isim burada da var mı diye
+-- doğrular -- biri eksikse ("hayalet debug komutu") sunucu açılışını durdurur.
+Matrix.Security.GatedCommands = {}
+
+-- ★ CANONICAL TEHLİKELİ/DEBUG KOMUT LİSTESİ. Yeni bir debug/test komutu
+-- eklerken buraya da eklenmezse, matrix_diagnostics.lua bunu bir "hayalet
+-- komut" olarak işaretleyip sunucu açılışını AbortResourceOnSimulationFailure
+-- ile durdurur (bkz. server/matrix_diagnostics.lua).
+-- ★ SINIFLANDIRMA NOTU: bazı komutlar (ör. /botkilitac, /operatiftasfiye,
+-- /panikiptal, /cetelideriata, /relaypurge) BU LİSTEYE BİLİNÇLİ OLARAK
+-- ALINMADI -- zaten Matrix.Hierarchy.HasCommandAuthority (org-içi rütbe:
+-- Leader/Logistics_Officer) ile doğru şekilde kilitli, MEŞRU oyun-içi
+-- kartel operasyon komutlarıdır; onları group.admin'e kilitlemek çalışan
+-- bir özelliği KIRARDI. /rotaciz de aynı şekilde ÇEKİRDEK oyun döngüsüdür
+-- (F10 menüsünden tetiklenir) -- admin-only YAPILMADI, bunun yerine
+-- eksik olan AYNI org-rütbe kapısı eklendi (bkz. RegisterCommand('rotaciz',
+-- ...) -- artık /sevket ve /panikiptal ile AYNI HasCommandAuthority
+-- disiplinine tabi). Buradaki liste yalnızca GERÇEKTEN ungated, in-fiction
+-- karşılığı olmayan (test/debug isimli VEYA hiçbir yetki kontrolü
+-- taşımayan) komutları kapsar.
+Matrix.Security.DangerousCommands = {
+    -- server/main.lua
+    'botyarat', 'botspawn', 'botdespawn', 'balistiktest', 'botbalistik',
+    'kortizoltetikle', 'botskill', 'botbio', 'botmekanik',
+    'radyoparazit', 'matrixdump', 'fizikselsevk',
+    -- server/bureau.lua
+    'burokilitzorla', 'traphouseekle', 'desifreekle', 'propagandatetikle',
+    'baskinzorla', 'baskinsonuclandir', 'dropsizintiekle', 'dropsizintisifirla',
+    'yayinbaslat', 'yayinbitir', 'polisgenetigi', 'dropsizintidurum',
+    -- server/logistics.lua
+    'aracele', 'hasarver', 'oldur', 'guvengoster', 'gecodeme', 'dropdurum',
+    -- server/market.lua
+    'piyasasifirla', 'nakityatir', 'nakitakla', 'gizliajandurum',
+    'denetleyicidurum', 'bolgeselrapor', 'sokaksatisrapor',
+    -- server/forensics.lua
+    'kovantopla', 'mobesehackle', 'cctvkaydet', 'kanitsabotaj',
+    'forensicdump', 'forensicrapor', 'asinmaayarla',
+    -- server/recruitment.lua (dosyanin kendi basligi: "herkese acik test grubu")
+    'sorgu', 'musterikaydet', 'havuztara', 'adaygoster', 'baskiuygula',
+    'sorgubitir', 'sokakdevsir',
+    -- server/kitchen.lua
+    'mutfaktest', 'dakikadongusu', 'saatdongusu', 'yakalatest',
+    'kortizolsicramasi', 'katmandurum', 'katmantemizle',
+    -- server/trap_house_interior.lua
+    'interiordurum',
+    -- server/district_hubs.lua
+    'hubata', 'hublistele',
+    -- server/blackmarket.lua
+    'karaborsagecmisi',
+    -- server/rendezvous.lua
+    'rendezvousdurum',
+    -- server/matrix_diagnostics.lua
+    'matrix_run_diagnostics', 'matrix_diag_detay'
+}
+
+-- ★ Bu listede OLMAYAN, ama AYRI bir mekanizma ile ayni sekilde
+-- kapatilmis kritik acikllar (matrix_diagnostics.lua'nin ACE kontrolu
+-- bunlari DENETLEMEZ -- farkli bir yetki modeli kullanirlar, admin/
+-- supervisor DEGIL, 'org-ici Leader' veya 'gorevde polis' otoritesi):
+--   • rutbeata         (server/market.lua)  -> Matrix.Hierarchy.CanAssignRank
+--                        (yalnizca mevcut Leader/supervisor VEYA ilk-Leader
+--                        bootstrap'i rutbe atayabilir -- ONCEDEN SIFIR
+--                        kontrol vardi, herkes kendini Leader yapabiliyordu).
+--   • rotaciz          (server/main.lua)    -> Matrix.Hierarchy.HasCommandAuthority
+--                        (org-ici, /sevket ile AYNI kapı -- CEKIRDEK oyun
+--                        donguisu, admin-only YAPILMADI).
+--   • telefonuyoket    (server/bureau.lua)  -> artik SADECE cagiranin
+--                        KENDI dna_id'sine kilitli (parametre enjeksiyonu
+--                        kapatildi, args[1] TAMAMEN yok sayilir).
+--   • davaac/davasorgula (server/bureau.lua),
+--     kanityukle       (server/gang_hoods.lua) -> Matrix.IsOnDutyPolice
+--                        (bu ucu de dogrudan Matrix.Bureau.ExecuteVerdict
+--                        zincirine baglaniyordu, hicbir kontrol yoktu).
+
+--- group.admin VEYA özel command.matrix_supervisor ACE principal'ına sahip
+--- olan her kaynak "supervisor" sayılır. Konsol (src==0) HER ZAMAN otorite
+--- sahibidir -- ayrı bir çağrı yolu ile ele alınır (bkz. RegisterGatedCommand).
+function Matrix.Security.IsSupervisor(src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+    local ok1, allowed1 = pcall(IsPlayerAceAllowed, src, 'group.admin')
+    if ok1 and allowed1 then return true end
+    local ok2, allowed2 = pcall(IsPlayerAceAllowed, src, 'command.matrix_supervisor')
+    if ok2 and allowed2 then return true end
+    return false
+end
+
+--- Yetkisiz bir tetikleme, adli kayıt politikasına uygun şekilde kalıcı bir
+--- tabloya (matrix_command_tamper_log) işlenir -- mevcut matrix_opsec_
+--- tamper_log İLE KARIŞTIRILMAZ (o tablo trap_house_id NOT NULL + FK ile
+--- YALNIZCA yanlış OPSEC parolası denemelerine özeldir, bkz. bureau.lua
+--- SEC-7; genel bir komut-tamper tablosu için şeması UYGUN DEĞİLDİR).
+function Matrix.Security.LogTamperAttempt(src, commandName, argsRaw)
+    local state = Matrix.GetOrCreatePlayerState and Matrix.GetOrCreatePlayerState(src)
+    local citizenid = state and state.citizenid
+
+    local argsOk, argsJson = pcall(json.encode, argsRaw or {})
+    if not argsOk then argsJson = '[]' end
+
+    local ok = pcall(function()
+        MySQL.insert([[
+            INSERT INTO matrix_command_tamper_log
+                (src, citizenid, command_name, raw_args, created_at)
+            VALUES (?, ?, ?, ?, NOW())
+        ]], { src, citizenid, commandName, argsJson })
+    end)
+    if not ok then
+        Matrix.Log('SECURITY', '[HATA] LogTamperAttempt INSERT basarisiz (yutuldu).')
+    end
+
+    Matrix.Log('SECURITY',
+        '[OPSEC TAMPER][HILECI ENJEKSIYONU] src=%d citizenid=%s komut=/%s -- YETKISIZ tetikleme REDDEDILDI ve islendi.',
+        src, tostring(citizenid), commandName)
+end
+
+--- Tüm tehlikeli/debug komutlar BUNUN ÜZERİNDEN kayıt edilir. `handler`
+--- normal bir RegisterCommand callback'idir (src, args, raw).
+function Matrix.Security.RegisterGatedCommand(name, handler)
+    Matrix.Security.GatedCommands[name] = true
+
+    RegisterCommand(name, function(src, args, raw)
+        -- Konsoldan (src==0) çalıştırma: konsol ZATEN sunucu otoritesidir,
+        -- ayrıca bir ACE kontrolüne TABİ DEĞİLDİR (FXServer'ın kendi
+        -- davranışıyla tutarlı).
+        if type(src) ~= 'number' or src <= 0 then
+            return handler(src, args, raw)
+        end
+
+        if not Matrix.Security.IsSupervisor(src) then
+            Matrix.Security.LogTamperAttempt(src, name, args)
+            NotifyResult(src, false, 'Yetkisiz. Bu komut yalnizca sunucu supervisorlerine acik (group.admin / command.matrix_supervisor).')
+            return
+        end
+
+        return handler(src, args, raw)
+    end, true) -- ★ restricted=true: FXServer'ın kendi 'command.<isim>' ACE kapısı da AYRICA devrede.
+end
+
 local function SafeForwardCoords(src, distance)
     if type(src) ~= 'number' or src <= 0 then return nil end
     local ped = GetPlayerPed(src)
@@ -1708,7 +1920,7 @@ RegisterCommand('coords', function(src)
     Reply(src, ('CONFIG ICIN (virgullu):  vector3(%.3f, %.3f, %.3f)'):format(c.x, c.y, c.z))
 end, false)
 
-RegisterCommand('botyarat', function(src, args)
+Matrix.Security.RegisterGatedCommand('botyarat', function(src, args)
     local name = args[1]
     local role = args[2] or 'runner'
     if type(name) ~= 'string' or name == '' then
@@ -1720,9 +1932,9 @@ RegisterCommand('botyarat', function(src, args)
 
     local bot = Matrix.CreateBotRecord({ name = name, role = role })
     Reply(src, ('Bot #%d matrise yazıldı: %s (%s)'):format(bot.id, bot.name, bot.role))
-end, false)
+end)
 
-RegisterCommand('botspawn', function(src, args)
+Matrix.Security.RegisterGatedCommand('botspawn', function(src, args)
     local botId = tonumber(args[1])
     if not botId then Reply(src, 'Kullanim: /botspawn [id]'); return end
     local coords = SafeForwardCoords(src, 2.0)
@@ -1730,15 +1942,15 @@ RegisterCommand('botspawn', function(src, args)
     local ok = Matrix.SpawnBot(botId, coords)
     Reply(src, ok and ('Bot #%d enjekte edildi.'):format(botId)
               or  ('Bot #%d enjekte edilemedi.'):format(botId))
-end, false)
+end)
 
-RegisterCommand('botdespawn', function(src, args)
+Matrix.Security.RegisterGatedCommand('botdespawn', function(src, args)
     local botId = tonumber(args[1])
     if not botId then Reply(src, 'Kullanim: /botdespawn [id]'); return end
     local ok = Matrix.DespawnBot(botId)
     Reply(src, ok and ('Bot #%d hafıza matrisine geri çekildi.'):format(botId)
               or  ('Bot #%d geri çekilemedi.'):format(botId))
-end, false)
+end)
 
 -- =====================================================================
 -- ★ [YAMA 1] /botkilitac — D1-v2 IO FAIL sonrası manuel kilit açma.
@@ -1883,7 +2095,21 @@ local function ResolveWaypointRef(refString)
     return nil, 'unrecognized_waypoint_format'
 end
 
+-- ★ [SEC-5][EKSIK YETKI KAPISI DUZELTMESI] /rotaciz, server/logistics.lua
+-- /sevket'in ("Multi-Waypoint" cok-uğraklı benzeri) HasCommandAuthority
+-- kapisindan YOKSUNDU -- bu, org rutbesi olmayan HERHANGI bir baglantili
+-- oyuncunun HERHANGI bir botu istedigi rotaya sevk edebilmesi anlamina
+-- geliyordu. Bu KOMUT admin-only YAPILMADI (F10 menusunden calisan
+-- CEKIRDEK oyun donguisudur) -- yalnizca /sevket ve /panikiptal ile AYNI
+-- org-rutbe kontrolu eklendi.
 RegisterCommand('rotaciz', function(src, args)
+    if Matrix.Hierarchy and Matrix.Hierarchy.HasCommandAuthority then
+        local callerState = Matrix.GetOrCreatePlayerState(src)
+        if not callerState or not callerState.citizenid or not Matrix.Hierarchy.HasCommandAuthority(callerState.citizenid) then
+            Reply(src, 'Bu emri vermek icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).'); return
+        end
+    end
+
     local botId = tonumber(args[1])
     local bot   = botId and Matrix.Bots[botId]
     if not bot then
@@ -1938,7 +2164,7 @@ RegisterCommand('rotaciz', function(src, args)
     end
 end, false)
 
-RegisterCommand('balistiktest', function(src, args)
+Matrix.Security.RegisterGatedCommand('balistiktest', function(src, args)
     local weaponSerial = tostring(args[1] or 'TEST-SERIAL-0001')
     local weaponWear   = Matrix.Clamp(tonumber(args[2]) or 0.0, 0.0, 1.0)
 
@@ -1948,9 +2174,9 @@ RegisterCommand('balistiktest', function(src, args)
     Reply(src, ('BalistikID:%s | Q_kovan:%.3f | Parmak izi:%.3f | Eşleşme:%.3f | Mühür:%s'):format(
         result.ballistic_id, result.striation_quality, result.fingerprint_quality,
         result.match_certainty, tostring(result.sealed)))
-end, false)
+end)
 
-RegisterCommand('botbalistik', function(src, args)
+Matrix.Security.RegisterGatedCommand('botbalistik', function(src, args)
     local botId = tonumber(args[1])
     if not botId or not Matrix.Bots[botId] then
         Reply(src, 'Kullanim: /botbalistik [id] [seri] [asinma 0-1]'); return
@@ -1964,7 +2190,7 @@ RegisterCommand('botbalistik', function(src, args)
     Reply(src, ('Bot #%d | BalistikID:%s | Q_kovan:%.3f | Eşleşme:%.3f | Mühür:%s'):format(
         botId, result.ballistic_id, result.striation_quality,
         result.match_certainty, tostring(result.sealed)))
-end, false)
+end)
 
 RegisterCommand('kortizolum', function(src)
     local state = Matrix.GetOrCreatePlayerState(src)
@@ -1974,7 +2200,7 @@ RegisterCommand('kortizolum', function(src)
         state.biology.resilience, state.biology.base_cortisol_recovery_rate))
 end, false)
 
-RegisterCommand('kortizoltetikle', function(src, args)
+Matrix.Security.RegisterGatedCommand('kortizoltetikle', function(src, args)
     local spikeType = args[1] or 'gunshot'
     if spikeType ~= 'gunshot' and spikeType ~= 'bureau_vehicle' then
         Reply(src, 'Kullanim: /kortizoltetikle [gunshot|bureau_vehicle]'); return
@@ -1984,7 +2210,7 @@ RegisterCommand('kortizoltetikle', function(src, args)
     if state then
         Reply(src, ('Kortizol sıçraması (%s). Yeni seviye: %.2f'):format(spikeType, state.biology.cortisol_level))
     end
-end, false)
+end)
 
 RegisterCommand('botdurum', function(src, args)
     local botId = tonumber(args[1])
@@ -2058,7 +2284,7 @@ local VALID_BIOLOGY_FIELDS = {
     addiction_level = true, base_cortisol_recovery_rate = true
 }
 
-RegisterCommand('botskill', function(src, args)
+Matrix.Security.RegisterGatedCommand('botskill', function(src, args)
     local botId = tonumber(args[1])
     local field = args[2]
     local value = tonumber(args[3])
@@ -2070,9 +2296,9 @@ RegisterCommand('botskill', function(src, args)
     bot.psychology[field] = Matrix.Clamp(value, 0.0, 1.0)
     Matrix.MarkBotDirty(botId)
     Reply(src, ('Bot #%d %s = %.3f olarak ayarlandı.'):format(botId, field, bot.psychology[field]))
-end, false)
+end)
 
-RegisterCommand('botbio', function(src, args)
+Matrix.Security.RegisterGatedCommand('botbio', function(src, args)
     local botId = tonumber(args[1])
     local field = args[2]
     local value = tonumber(args[3])
@@ -2085,9 +2311,9 @@ RegisterCommand('botbio', function(src, args)
     bot.biology[field] = Matrix.Clamp(value, 0.0, maxV)
     Matrix.MarkBotDirty(botId)
     Reply(src, ('Bot #%d %s = %.3f olarak ayarlandı.'):format(botId, field, bot.biology[field]))
-end, false)
+end)
 
-RegisterCommand('botmekanik', function(src, args)
+Matrix.Security.RegisterGatedCommand('botmekanik', function(src, args)
     local botId = tonumber(args[1])
     local value = tonumber(args[2])
     local bot = botId and Matrix.Bots[botId]
@@ -2097,16 +2323,16 @@ RegisterCommand('botmekanik', function(src, args)
     end
     bot.state.weapon_wear_level = Matrix.Clamp(value, 0.0, 1.0)
     Reply(src, ('Bot #%d silah asinmasi (ham) = %.3f olarak ayarlandi.'):format(botId, bot.state.weapon_wear_level))
-end, false)
+end)
 
-RegisterCommand('radyoparazit', function(src, args)
+Matrix.Security.RegisterGatedCommand('radyoparazit', function(src, args)
     local targetSrc = tonumber(args[1]) or src
     local intensity = tonumber(args[2]) or 1.0
     Matrix.Radio.ApplyStatic(targetSrc, intensity, 'debug')
     Reply(src, ('Telsiz statiği src=%d yoğunluk=%.2f olarak tetiklendi.'):format(targetSrc, intensity))
-end, false)
+end)
 
-RegisterCommand('matrixdump', function(src)
+Matrix.Security.RegisterGatedCommand('matrixdump', function(src)
     local count = 0
     for id, bot in pairs(Matrix.Bots) do
         count = count + 1
@@ -2118,9 +2344,9 @@ RegisterCommand('matrixdump', function(src)
             bot.state.weapon_wear_level or 1.0))
     end
     Reply(src, ('--- Toplam %d bot ---'):format(count))
-end, false)
+end)
 
-RegisterCommand('fizikselsevk', function(src, args)
+Matrix.Security.RegisterGatedCommand('fizikselsevk', function(src, args)
     local count = 0
     for botId, d in pairs(Matrix.Dispatches) do
         count = count + 1
@@ -2137,4 +2363,4 @@ RegisterCommand('fizikselsevk', function(src, args)
             routeInfo))
     end
     Reply(src, ('--- Toplam %d fiziksel dispatch ---'):format(count))
-end, false)
+end)

@@ -40,6 +40,9 @@ local os_date                    = os.date
 local os_time                    = os.time
 local GetPlayerPed               = GetPlayerPed
 local GetEntityCoords            = GetEntityCoords
+local GetPeds                    = GetPeds
+local DoesEntityExist             = DoesEntityExist
+local GetPedPropIndex            = GetPedPropIndex
 
 local propagandaMomentum = 0.0
 local cyberLeakHeatmap   = {}
@@ -401,6 +404,94 @@ local function ComputeRaidSquad(trapHouseId, house)
 
     return squadSize, breachMethod, escapeWindow
 end
+
+-- =====================================================================
+-- ★★★ SİVİL MUHBİR / MASKE ENTEGRASYONU ★★★
+-- server/logistics.lua Matrix.Logistics.ApplyCombatDamage, bir bot
+-- ELENDİĞİNDE (ve saldıran bir gerçek oyuncuysa) bu hook'u çağırır.
+--
+-- GetPedDensityMultiplier gibi bir GETTER native'i YOKTUR (bkz. server/
+-- logistics.lua Config.Traffic yorumu) -- gerçek sivil (ped) sayısını
+-- GetPeds() ile örneklem yarıçapında sayarız. Maske kontrolü GTA V'in
+-- gerçek prop sistemi üzerinden yapılır: GetPedPropIndex(ped, 1) == -1
+-- ise "Mask" prop slotu BOŞTUR (maskesiz).
+--
+--   • Sivil yoksa (yaricapta 0 ped) -> kimse GORMEDI, sessizce cikilir.
+--   • Maskesiz -> GERCEK citizenid/dna_id polise ihbar edilir,
+--     matrix_bureau_intensity ConVar'i (bureau.lua/logistics.lua/
+--     wound_system.lua ILE AYNI ConVar) katlanir.
+--   • Maskeli -> fail kimligi UNKNOWN-MASKED-SUBJECT olarak KALIR (sistem
+--     COZEMEZ), bunun yerine bolgeye asenkron bir hitsquad sevk edilir
+--     (Matrix.HitSquad.DispatchToNearestPlayer, pcall'li -- hitsquad.lua
+--     yuklenmemis olsa bile bu fonksiyon COKMEZ).
+-- =====================================================================
+local function ComputeNearbyPedCount(coords, radius)
+    if not (coords and radius and radius > 0.0) then return 0 end
+    local ok, peds = pcall(GetPeds)
+    if not ok or type(peds) ~= 'table' then return 0 end
+
+    local radiusSq = radius * radius
+    local count = 0
+    for i = 1, #peds do
+        local ped = peds[i]
+        if ped and ped ~= 0 and DoesEntityExist(ped) then
+            local okCoords, pedCoords = pcall(GetEntityCoords, ped)
+            if okCoords and pedCoords then
+                local dx, dy, dz = pedCoords.x - coords.x, pedCoords.y - coords.y, pedCoords.z - coords.z
+                if (dx * dx + dy * dy + dz * dz) <= radiusSq then count = count + 1 end
+            end
+        end
+    end
+    return count
+end
+
+local function IsWearingMask(src)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return false end
+    local ok, propIndex = pcall(GetPedPropIndex, ped, (Config.Witness and Config.Witness.MaskPropSlot) or 1)
+    if not ok then return false end
+    return (tonumber(propIndex) or -1) ~= -1
+end
+
+--- @return string|nil failIdentifier -- gercek citizenid VEYA
+---   'UNKNOWN-MASKED-SUBJECT' VEYA nil (kimse tanik olmadi).
+function Matrix.Bureau.WitnessBotElimination(attackerSrc, botId, coords)
+    if type(attackerSrc) ~= 'number' or attackerSrc <= 0 then return nil end
+    if not (Config.Witness and coords) then return nil end
+
+    local density = ComputeNearbyPedCount(coords, Config.Witness.SampleRadius or 30.0)
+    if density <= 0 then return nil end -- kimse gormedi -- sessiz cikis
+
+    local masked   = IsWearingMask(attackerSrc)
+    local before   = GetConvarFloat('matrix_bureau_intensity', 1.0)
+    local after    = before * (Config.Witness.BureauIntensitySpikeMultiplier or 2.0)
+    SetConvar('matrix_bureau_intensity', tostring(after))
+
+    if masked then
+        Matrix.Log('BUREAU',
+            '[MUHBIR][MASKELI] Bot #%d olumu %d sivil tarafindan goruldu -- fail=UNKNOWN-MASKED-SUBJECT. matrix_bureau_intensity %.2f -> %.2f.',
+            botId, density, before, after)
+
+        if Config.Witness.HitSquadDispatchOnMasked and Matrix.HitSquad and Matrix.HitSquad.DispatchToNearestPlayer then
+            pcall(Matrix.HitSquad.DispatchToNearestPlayer, coords, 'muhbir_maskeli')
+        end
+        return 'UNKNOWN-MASKED-SUBJECT'
+    end
+
+    local state      = Matrix.GetOrCreatePlayerState(attackerSrc)
+    local citizenid  = state and state.citizenid
+    local dnaId      = state and state.dna_id
+
+    Matrix.Log('BUREAU',
+        '[MUHBIR] Bot #%d olumu %d sivil tarafindan goruldu -- fail kimligi=%s (dna=%s) polise ihbar edildi. matrix_bureau_intensity %.2f -> %.2f.',
+        botId, density, tostring(citizenid), tostring(dnaId), before, after)
+
+    return citizenid
+end
+
+exports('WitnessBotElimination', function(attackerSrc, botId, coords)
+    return Matrix.Bureau.WitnessBotElimination(attackerSrc, botId, coords)
+end)
 
 function Matrix.Bureau.IssueRaid(trapHouseId)
     local house = Matrix.TrapHouses[trapHouseId]
@@ -881,7 +972,7 @@ local function ParseCoordNumber(s)
     return tonumber((tostring(s or ''):gsub(',', '')))
 end
 
-RegisterCommand('traphouseekle', function(src, args)
+Matrix.Security.RegisterGatedCommand('traphouseekle', function(src, args)
     local label = args[1]
     local x, y, z = ParseCoordNumber(args[2]), ParseCoordNumber(args[3]), ParseCoordNumber(args[4])
     if not x or not y or not z then
@@ -900,7 +991,7 @@ RegisterCommand('traphouseekle', function(src, args)
     end
 
     Reply(src, 'Trap house olusturma istegi gonderildi (async). Birkac saniye sonra /traphousedurum ile dogrulayin.')
-end, false)
+end)
 
 RegisterCommand('traphousedurum', function(src, args)
     local id = tonumber(args[1])
@@ -912,7 +1003,7 @@ RegisterCommand('traphousedurum', function(src, args)
         cyberLeakHeatmap[id] or 0.0, ComputePatternRegularity(id), tostring(house.raid_ordered)))
 end, false)
 
-RegisterCommand('desifreekle', function(src, args)
+Matrix.Security.RegisterGatedCommand('desifreekle', function(src, args)
     local id = tonumber(args[1])
     local amount = tonumber(args[2])
     if not id or not Matrix.TrapHouses[id] or not amount then
@@ -920,23 +1011,23 @@ RegisterCommand('desifreekle', function(src, args)
     end
     Matrix.Bureau.AdvanceDecryption(id, amount)
     Reply(src, ('Trap #%d deşifre: %.4f'):format(id, Matrix.TrapHouses[id].decryption_confidence))
-end, false)
+end)
 
-RegisterCommand('propagandatetikle', function(src, args)
+Matrix.Security.RegisterGatedCommand('propagandatetikle', function(src, args)
     local id = tonumber(args[1])
     if not id or not Matrix.TrapHouses[id] then Reply(src, 'Kullanim: /propagandatetikle [id]'); return end
     local momentum, heat = Matrix.Bureau.TriggerPropaganda(id)
     Reply(src, ('Momentum:%.3f Heat:%.3f'):format(momentum, heat))
-end, false)
+end)
 
-RegisterCommand('baskinzorla', function(src, args)
+Matrix.Security.RegisterGatedCommand('baskinzorla', function(src, args)
     local id = tonumber(args[1])
     if not id or not Matrix.TrapHouses[id] then Reply(src, 'Kullanim: /baskinzorla [id]'); return end
     Matrix.Bureau.IssueRaid(id)
     Reply(src, ('Trap #%d için baskın ZORLA tetiklendi (test modu).'):format(id))
-end, false)
+end)
 
-RegisterCommand('baskinsonuclandir', function(src, args)
+Matrix.Security.RegisterGatedCommand('baskinsonuclandir', function(src, args)
     local id = tonumber(args[1])
     local outcome = args[2]
     if not id or not outcome then
@@ -944,23 +1035,23 @@ RegisterCommand('baskinsonuclandir', function(src, args)
     end
     local ok = Matrix.Bureau.ResolveRaidOutcome(id, outcome)
     Reply(src, ok and 'Sonuç kaydedildi.' or 'Geçersiz sonuç veya aktif baskın kaydı yok.')
-end, false)
+end)
 
-RegisterCommand('yayinbaslat', function(src)
+Matrix.Security.RegisterGatedCommand('yayinbaslat', function(src)
     local ok = Matrix.Bureau.StartLivestream(src)
     Reply(src, ok and 'Canlı yayın başlatıldı (test).' or 'Zaten yayında veya geçersiz src.')
-end, false)
+end)
 
-RegisterCommand('yayinbitir', function(src)
+Matrix.Security.RegisterGatedCommand('yayinbitir', function(src)
     local ok = Matrix.Bureau.StopLivestream(src)
     Reply(src, ok and 'Canlı yayın bitirildi (test).' or 'Aktif yayın bulunamadı.')
-end, false)
+end)
 
 RegisterCommand('momentumgoster', function(src)
     Reply(src, ('Propaganda momentum: %.4f'):format(propagandaMomentum))
 end, false)
 
-RegisterCommand('dropsizintiekle', function(src, args)
+Matrix.Security.RegisterGatedCommand('dropsizintiekle', function(src, args)
     local dropId     = tonumber(args[1])
     local quality    = tonumber(args[2])
     local supplierId = tonumber(args[3])
@@ -971,9 +1062,9 @@ RegisterCommand('dropsizintiekle', function(src, args)
     local ok = Matrix.Bureau.OnDeadDropForensicPickup(dropId, quality, supplierId, citizenid)
     Reply(src, ok and ('Örnek eklendi. Toplam: %d'):format(#(DropForensicsByDropId[dropId] and DropForensicsByDropId[dropId].samples or {}))
               or 'Geçersiz parametre.')
-end, false)
+end)
 
-RegisterCommand('dropsizintidurum', function(src)
+Matrix.Security.RegisterGatedCommand('dropsizintidurum', function(src)
     local count = 0
     for dropId, rec in pairs(DropForensicsByDropId) do
         count = count + 1
@@ -984,9 +1075,9 @@ RegisterCommand('dropsizintidurum', function(src)
     end
     Reply(src, ('--- Toplam %d drop adli kaydi ---'):format(count))
     Reply(src, ('BureauLeakCertaintyThreshold: %.2f'):format(CfgBureau('BureauLeakCertaintyThreshold', 0.65)))
-end, false)
+end)
 
-RegisterCommand('dropsizintisifirla', function(src, args)
+Matrix.Security.RegisterGatedCommand('dropsizintisifirla', function(src, args)
     local dropId = tonumber(args[1])
     if not dropId then Reply(src, 'Kullanim: /dropsizintisifirla [dropId]'); return end
     if DropForensicsByDropId[dropId] then
@@ -995,7 +1086,7 @@ RegisterCommand('dropsizintisifirla', function(src, args)
     else
         Reply(src, 'Bu drop için aktif adli kayit yok.')
     end
-end, false)
+end)
 
 -- =====================================================================
 -- KATMAN 7 [T4] FAZ 1: BÜRO KİLİDİ
@@ -1245,15 +1336,16 @@ RegisterCommand('burokilitdurum', function(src, args)
     local coefficient = ComputeLockdownCoefficient(id)
     Reply(src, ('Trap #%d | Telsiz-Ihlali:%d Ort.Saflik:%.3f | Katsayi:%.3f/%.2f | Kilit:%s'):format(
         id, state.radio_breach_count, state.average_purity_intercepted,
-        coefficient, Config.Bureau.LockdownEvidenceThreshold, tostring(state.lockdown_active)))
+        coefficient, Config.Bureau.LockdownEvidenceThreshold,
+        Matrix.FormatMilSimStatus(state.lockdown_active, '🚨 ABLUKA DEVREDE', '🟢 EMNİYETTE')))
 end, false)
 
-RegisterCommand('burokilitzorla', function(src, args)
+Matrix.Security.RegisterGatedCommand('burokilitzorla', function(src, args)
     local id = tonumber(args[1])
     if not id or not Matrix.TrapHouses[id] then Reply(src, 'Kullanim: /burokilitzorla [trapHouseId]'); return end
     Matrix.Bureau.TriggerLockdown(id, ComputeLockdownCoefficient(id))
     Reply(src, ('Trap #%d icin BURO KILIDI ZORLA tetiklendi (test modu).'):format(id))
-end, false)
+end)
 
 lib.callback.register('matrix:callback:getLearningCoreReport', function(src)
     local entries = {}
@@ -1320,24 +1412,38 @@ function Matrix.Bureau.RunAIAdvisoryPass()
         }
     })
 
-    PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
-        if statusCode ~= 200 then
-            Matrix.Log('BUREAU', '[T4][AI] OpenAI istegi basarisiz (HTTP %s); fallbackToDeterministic=%s, ogrenme motoru degismeden calismaya devam ediyor.',
-                tostring(statusCode), tostring(Config.AI_Matrix_Brain.fallbackToDeterministic))
-            return
-        end
+    -- ★ [SEC] pcall guard: Authorization header'ı burada inşa edilir --
+    -- apiKey (server/config_secrets.lua, server-only) HİÇBİR log/Reply
+    -- satırına asla YAZILMAZ; bir hata olsa bile yalnızca jenerik bir
+    -- mesaj basılır, anahtarın kendisi ASLA konsola/oyuncuya sızmaz.
+    local reqOk, reqErr = pcall(function()
+        PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
+            if statusCode ~= 200 then
+                Matrix.Log('BUREAU', '[T4][AI] OpenAI istegi basarisiz (HTTP %s); fallbackToDeterministic=%s, ogrenme motoru degismeden calismaya devam ediyor.',
+                    tostring(statusCode), tostring(Config.AI_Matrix_Brain.fallbackToDeterministic))
+                return
+            end
 
-        local ok, decoded = pcall(json.decode, response)
-        if not ok then
-            Matrix.Log('BUREAU', '[T4][AI] OpenAI yaniti cozumlenemedi, deterministik motor etkilenmedi.')
-            return
-        end
+            local ok, decoded = pcall(json.decode, response)
+            if not ok then
+                Matrix.Log('BUREAU', '[T4][AI] OpenAI yaniti cozumlenemedi, deterministik motor etkilenmedi.')
+                return
+            end
 
-        TriggerEvent('matrix:internal:aiAdvisoryReceived', decoded)
-    end, 'POST', body, {
-        ['Content-Type']  = 'application/json',
-        ['Authorization'] = 'Bearer ' .. Config.AI_Matrix_Brain.apiKey
-    })
+            TriggerEvent('matrix:internal:aiAdvisoryReceived', decoded)
+        end, 'POST', body, {
+            ['Content-Type']  = 'application/json',
+            ['Authorization'] = 'Bearer ' .. tostring(Config.AI_Matrix_Brain.apiKey)
+        })
+    end)
+    if not reqOk then
+        -- ★ reqErr KASITLI OLARAK loglanmaz: Authorization header'i AYNI
+        -- pcall govdesinde insa edildigi icin bir hata mesaji teorik
+        -- olarak header string'ini icerebilir -- apiKey'in en ufak bir
+        -- ihtimalle bile loga sizmasini onlemek icin yalnizca sabit,
+        -- jenerik bir mesaj basilir.
+        Matrix.Log('BUREAU', '[T4][AI] PerformHttpRequest cagrisi basarisiz (yutuldu, detay bilerek loglanmadi -- sir sizintisi riski).')
+    end
 end
 
 -- =====================================================================
@@ -1510,7 +1616,7 @@ RegisterCommand('rusvetteklifi', function(src, args)
     end
 end, false)
 
-RegisterCommand('polisgenetigi', function(src, args)
+Matrix.Security.RegisterGatedCommand('polisgenetigi', function(src, args)
     local citizenid = args[1]
     if type(citizenid) ~= 'string' then Reply(src, 'Kullanim: /polisgenetigi [citizenid]'); return end
 
@@ -1518,7 +1624,7 @@ RegisterCommand('polisgenetigi', function(src, args)
     if not personality then Reply(src, 'Kisilik hesaplanamadi.'); return end
 
     Reply(src, ('%s -> Integrity:%.3f Greed:%.3f'):format(citizenid, personality.integrity, personality.greed))
-end, false)
+end)
 
 exports('GetPolicePersonality', function(citizenid, npcModelHash, npcCoords)
     return Matrix.Bureau.GetPolicePersonality(citizenid, npcModelHash, npcCoords)
@@ -1614,23 +1720,30 @@ function Matrix.Bureau.RequestAITrialNarrative(officerSrc, session)
         }
     })
 
-    PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
-        if statusCode ~= 200 then
-            Reply(officerSrc, ('[ADLİ İFADE] OpenAI istegi basarisiz (HTTP %s); deterministik motor degismeden devam ediyor.'):format(tostring(statusCode)))
-            return
-        end
-        local ok, decoded = pcall(json.decode, response)
-        if not ok or not decoded.choices or not decoded.choices[1] then
-            Reply(officerSrc, '[ADLİ İFADE] OpenAI yaniti cozumlenemedi.')
-            return
-        end
-        local narrative = decoded.choices[1].message and decoded.choices[1].message.content
-        Reply(officerSrc, '[MAHKEME KARARI - AI GEREKCE]')
-        Reply(officerSrc, tostring(narrative or 'Anlati uretilemedi.'))
-    end, 'POST', body, {
-        ['Content-Type']  = 'application/json',
-        ['Authorization'] = 'Bearer ' .. Config.AI_Matrix_Brain.apiKey
-    })
+    -- ★ [SEC] pcall guard -- bkz. RunAIAdvisoryPass'teki AYNI yorum:
+    -- apiKey (server-only) hicbir Reply/Log satirina ASLA yazilmaz.
+    local reqOk = pcall(function()
+        PerformHttpRequest('https://api.openai.com/v1/chat/completions', function(statusCode, response)
+            if statusCode ~= 200 then
+                Reply(officerSrc, ('[ADLİ İFADE] OpenAI istegi basarisiz (HTTP %s); deterministik motor degismeden devam ediyor.'):format(tostring(statusCode)))
+                return
+            end
+            local ok, decoded = pcall(json.decode, response)
+            if not ok or not decoded.choices or not decoded.choices[1] then
+                Reply(officerSrc, '[ADLİ İFADE] OpenAI yaniti cozumlenemedi.')
+                return
+            end
+            local narrative = decoded.choices[1].message and decoded.choices[1].message.content
+            Reply(officerSrc, '[MAHKEME KARARI - AI GEREKCE]')
+            Reply(officerSrc, tostring(narrative or 'Anlati uretilemedi.'))
+        end, 'POST', body, {
+            ['Content-Type']  = 'application/json',
+            ['Authorization'] = 'Bearer ' .. tostring(Config.AI_Matrix_Brain.apiKey)
+        })
+    end)
+    if not reqOk then
+        Reply(officerSrc, '[ADLİ İFADE] OpenAI istegi baslatilamadi (dahili hata, detay bilerek loglanmadi).')
+    end
 end
 
 function Matrix.Bureau.OpenTrial(officerSrc, defendantSrc, dnaId)
@@ -1776,7 +1889,19 @@ function Matrix.Bureau.ExecuteVerdict(officerSrc, session)
     end
 end
 
+-- ★ [SEC][YETKI KAPISI EKLENDI] /davaac ve /davasorgula ÖNCEDEN hiçbir
+-- kontrol taşımıyordu -- herhangi bir bağlı oyuncu, polis/Büro rolünde
+-- OLMASA BİLE, başka HERHANGİ bir oyuncuyu (defendantSrc) doğrudan dava
+-- açıp mahkum edebiliyordu (bkz. Matrix.Bureau.ExecuteVerdict zinciri).
+-- Artık Matrix.IsOnDutyPolice(src) (GÖREVDE polis/şerif/LEO) ZORUNLU.
 RegisterCommand('davaac', function(src, args)
+    if not Matrix.IsOnDutyPolice(src) then
+        Reply(src, 'Yetkisiz: dava acmak icin gorevde polis/serif olmaniz gerekir.')
+        if Matrix.Security and Matrix.Security.LogTamperAttempt then
+            Matrix.Security.LogTamperAttempt(src, 'davaac', args)
+        end
+        return
+    end
     local defendantSrc = tonumber(args[1])
     local dnaId = args[2]
     if not defendantSrc or type(dnaId) ~= 'string' then
@@ -1789,6 +1914,13 @@ RegisterCommand('davaac', function(src, args)
 end, false)
 
 RegisterCommand('davasorgula', function(src, args)
+    if not Matrix.IsOnDutyPolice(src) then
+        Reply(src, 'Yetkisiz: sorgu yapmak icin gorevde polis/serif olmaniz gerekir.')
+        if Matrix.Security and Matrix.Security.LogTamperAttempt then
+            Matrix.Security.LogTamperAttempt(src, 'davasorgula', args)
+        end
+        return
+    end
     local defendantSrc = tonumber(args[1])
     local responseKind = args[2]
     if not defendantSrc or not responseKind then
@@ -1832,8 +1964,19 @@ function Matrix.Bureau.SabotagePhoneLine(src, dnaId)
     return true, { dna_id = dnaId }
 end
 
-RegisterCommand('telefonuyoket', function(src, args)
-    local ok, resultOrReason = Matrix.Bureau.SabotagePhoneLine(src, args[1])
+-- ★ [SEC-5][PARAMETRE ENJEKSIYONU DUZELTMESI] Bu komut ZORUNLU bir sivil
+-- komuttur (bkz. README Sandbox bölümü) ve YALNIZCA çağıranın KENDİ
+-- player_state.dna_id'sine kilitlenmelidir. Önceki sürüm args[1]'i
+-- (çağıranın chat'e yazdığı KEYFİ bir string) doğrudan Matrix.Bureau.
+-- SabotagePhoneLine'a dnaId olarak iletiyordu -- bu, herhangi bir
+-- oyuncunun BAŞKA bir oyuncunun/botun dna_id'sini bilerek/tahmin ederek
+-- ONLARIN şifreli mesajlarını ve mühürsüz siber delillerini silmesine
+-- izin veriyordu (server/phone_bridge.lua'nın matrix:server:phone:
+-- remoteWipe net-event'i ZATEN doğru şekilde kendi dna_id'sine kilitliydi
+-- -- bu chat-komutu yolu GÖZDEN KAÇMIŞTI). args[1] artık TAMAMEN YOK
+-- SAYILIR; hedef HER ZAMAN çağıranın kendi state'inden çözülür.
+RegisterCommand('telefonuyoket', function(src)
+    local ok, resultOrReason = Matrix.Bureau.SabotagePhoneLine(src, nil)
     if ok then
         Reply(src, ('[HAT SABOTAJI] %s hattina ait kriptolu mesajlar ve kesinlesmemis siber deliller kalici olarak kazindi.'):format(resultOrReason.dna_id))
     else
@@ -2038,17 +2181,32 @@ local function _BurnAndRaidByHolder(holderIdentifier)
     end
 end
 
---- ★ [SEC-6][YAMA 2] Rolling cipher mutasyon protokolü — Lua-seviyesi
---- satır kilidi + SELECT ... FOR UPDATE + DB CAS.
+--- ★ [SEC-6 v1 — ARTIK YALNIZCA FALLBACK] Rolling cipher mutasyon protokolü
+--- — Lua-seviyesi satır kilidi + SELECT ... FOR UPDATE + DB CAS.
+---
+--- ★★★ BİLİNEN AÇIK (bu yüzden v2'ye taşındı): oxmysql'in her `.await()`
+--- çağrısı havuzdan (pool) BAĞIMSIZ bir bağlantı alabilir. `SELECT ... FOR
+--- UPDATE` ile ardından gelen `UPDATE` AYRI İKİ round-trip olduğu ve
+--- aralarında açık bir `START TRANSACTION`/`COMMIT` BULUNMADIĞI için
+--- (autocommit altında), InnoDB satır kilidi SELECT ifadesi biter bitmez
+--- "havada" bırakılabilir -- yani yorumdaki "InnoDB satır kilidi" iddiası
+--- yanıltıcıdır. Bu fonksiyon YİNE DE güvenlidir çünkü nihai doğruluk CAS
+--- UPDATE'in (WHERE rolling_cipher_key = oldKey) kendisinden gelir, ama
+--- gerçek atomiklik garantisi YOKTUR. Şimdi yalnızca sp_matrix_process_
+--- bribe_crypto_transaction (bkz. sql/matrix_financial_core.sql, TEK bir
+--- MariaDB transaction'ında SELECT...FOR UPDATE + UPDATE + COMMIT) migration'ı
+--- HENÜZ uygulanmamış eski dağıtımlar için bir GÜVENLİ AZALMA (fallback)
+--- olarak tutuluyor -- bkz. Matrix.Bureau.ProcessBribeCryptoTransaction (v2).
 ---
 --- Akış:
 ---   1) __CryptoLocks[walletAddress] al (aynı cüzdana eşzamanlı giriş yasak).
----   2) SELECT ... FOR UPDATE (InnoDB satır kilidi, taze okuma).
+---   2) SELECT ... FOR UPDATE (InnoDB satır kilidi, taze okuma -- yukarıdaki
+---      not: tek başına atomiklik GARANTİ ETMEZ, CAS bunu telafi eder).
 ---   3) Context drift kontrolü — DB holder ile target uyuşmuyorsa RED.
 ---   4) CAS UPDATE (WHERE rolling_cipher_key = oldKey).
 ---   5) Yalnızca affected == 1 ise RAM önbelleğine yaz.
 ---   6) Kilit HER durumda bırakılır (pcall/finally).
-function Matrix.Bureau.ProcessBribeCryptoTransaction(walletAddress, amount, targetIdentifier)
+function Matrix.Bureau._ProcessBribeCryptoTransactionLegacyFallback(walletAddress, amount, targetIdentifier)
     if type(walletAddress) ~= 'string' or walletAddress == '' then return false, 'bad_wallet' end
     amount = tonumber(amount)
     if not amount or amount ~= amount or amount <= 0.0 then return false, 'bad_amount' end
@@ -2139,6 +2297,112 @@ function Matrix.Bureau.ProcessBribeCryptoTransaction(walletAddress, amount, targ
         '[SEC-6][CRYPTO] wallet=%s -> $%.4f transfer, tx_seq=%d, cipher mutasyona ugradi.',
         walletAddress, amount, newSeq)
     return true, { tx_sequence = newSeq, balance = newBalance }
+end
+
+--- Stored procedure'ün `CALL sp_...(...)` sonunda döndürdüğü SELECT
+--- sonucunu, oxmysql/mysql2'nin CALL için verebileceği birkaç olası
+--- şekilden (düz satır dizisi, iç içe result-set dizisi) paranoyakça çözer.
+local function _UnwrapProcedureRow(rawResult)
+    if type(rawResult) ~= 'table' then return nil end
+    if rawResult.result_code ~= nil then return rawResult end
+    local first = rawResult[1]
+    if type(first) == 'table' then
+        if first.result_code ~= nil then return first end
+        if type(first[1]) == 'table' and first[1].result_code ~= nil then return first[1] end
+    end
+    return nil
+end
+
+--- ★★★ [SEC-6 v2 — TEK ATOMİK SAKLI YORDAM] ★★★
+--- sp_matrix_process_bribe_crypto_transaction (sql/matrix_financial_core.sql)
+--- SELECT ... FOR UPDATE + context-drift/bakiye kontrolü + CAS UPDATE'i TEK
+--- bir MariaDB transaction'ı (START TRANSACTION ... COMMIT/ROLLBACK) içinde,
+--- TEK round-trip'te (CALL'ın sonundaki SELECT aynı yanıtla döner) çalıştırır.
+--- Bu, v1'deki "iki ayrı .await() arasında satır kilidinin havada kalması"
+--- açığını KÖKTEN kapatır -- artık kilit ve mutasyon aynı bağlantı, aynı
+--- transaction, aynı round-trip içindedir.
+---
+--- Lua __CryptoLocks mutex'i AYRICA korunur: aynı sürecte eşzamanlı iki
+--- çağrıyı DB'ye hiç gitmeden 'wallet_busy' ile geri çevirir (gereksiz
+--- round-trip'i önler) -- SP'nin kendi atomikliğine bir alternatif değil,
+--- ek bir savunma katmanıdır (Config/mimari "0 RNG, katı serialization"
+--- ilkesiyle tutarlı).
+---
+--- Migration henüz uygulanmamışsa (CALL hata verir: "PROCEDURE ... does
+--- not exist" vb.) otomatik olarak v1 (_ProcessBribeCryptoTransactionLegacyFallback)
+--- CAS akışına düşer -- production hiçbir zaman sert şekilde kırılmaz.
+function Matrix.Bureau.ProcessBribeCryptoTransaction(walletAddress, amount, targetIdentifier)
+    if type(walletAddress) ~= 'string' or walletAddress == '' then return false, 'bad_wallet' end
+    amount = tonumber(amount)
+    if not amount or amount ~= amount or amount <= 0.0 then return false, 'bad_amount' end
+    if type(targetIdentifier) ~= 'string' or targetIdentifier == '' then return false, 'bad_target' end
+
+    if Matrix.Bureau.__CryptoLocks[walletAddress] then
+        return false, 'wallet_busy'
+    end
+    Matrix.Bureau.__CryptoLocks[walletAddress] = true
+
+    local spOk, spRows = pcall(function()
+        return MySQL.query.await(
+            'CALL sp_matrix_process_bribe_crypto_transaction(?, ?, ?)',
+            { walletAddress, amount, targetIdentifier })
+    end)
+
+    Matrix.Bureau.__CryptoLocks[walletAddress] = nil
+
+    if not spOk then
+        Matrix.Log('BUREAU',
+            '[SEC-6][SP FALLBACK] sp_matrix_process_bribe_crypto_transaction cagrisi basarisiz (%s) -- v1 Lua-seviyesi CAS fallback yoluna dusuluyor. Migration uygulandi mi kontrol edin (sql/matrix_financial_core.sql).',
+            tostring(spRows))
+        return Matrix.Bureau._ProcessBribeCryptoTransactionLegacyFallback(walletAddress, amount, targetIdentifier)
+    end
+
+    local row = _UnwrapProcedureRow(spRows)
+    if not row then
+        Matrix.Log('BUREAU',
+            '[SEC-6][SP FALLBACK] Beklenmeyen/bos SP sonuc sekli -- v1 Lua-seviyesi CAS fallback yoluna dusuluyor.')
+        return Matrix.Bureau._ProcessBribeCryptoTransactionLegacyFallback(walletAddress, amount, targetIdentifier)
+    end
+
+    local code             = row.result_code
+    local holderIdentifier = row.holder_identifier
+
+    if code == 'ok' then
+        local newBalance = tonumber(row.new_balance) or 0.0
+        local newSeq     = tonumber(row.new_tx_sequence) or 0
+        -- ★ RAM önbelleği bilinçli olarak GEÇERSİZ KILINIR (nil), doldurulmaz:
+        -- gerçek rolling_cipher_key artık yalnızca SP içinde (SHA2) üretiliyor
+        -- ve Lua'ya hiç dönmüyor. Yarım/nil bir cipher_key ile önbelleği
+        -- doldurmak yerine bir sonraki okuma _LoadCryptoWallet üzerinden
+        -- DB'den TAZE gelir -- staleness riski SIFIRDIR.
+        Matrix.Bureau.CryptoWallets[walletAddress] = nil
+        Matrix.Log('BUREAU',
+            '[SEC-6][CRYPTO][SP-ATOMIK] wallet=%s -> $%.4f transfer, tx_seq=%d.',
+            walletAddress, amount, newSeq)
+        return true, { tx_sequence = newSeq, balance = newBalance }
+    end
+
+    -- ★ context_drift / cipher_drift: KURBAN KORUMASI, SP'nin transaction
+    -- icinde DB'den okudugu LEGIT holder uzerinde (targetIdentifier'a DEGIL).
+    if code == 'context_drift' or code == 'cipher_drift' then
+        Matrix.Bureau.CryptoWallets[walletAddress] = nil
+        if holderIdentifier then
+            _BurnAndRaidByHolder(holderIdentifier)
+        end
+        Matrix.Log('BUREAU',
+            '[SEC-6][%s][SP-ATOMIK] wallet=%s legit-holder=%s -- ROLLBACK (tek transaction icinde), burn+raid LEGIT holder uzerinde.',
+            tostring(code):upper(), walletAddress, tostring(holderIdentifier))
+        return false, code
+    end
+
+    if code == 'wallet_not_found' or code == 'insufficient_balance' then
+        return false, code
+    end
+
+    -- Bilinmeyen/beklenmeyen result_code (ör. SQLEXCEPTION handler'i) ->
+    -- FAIL-CLOSED: parayi ASLA dusurme, islemi reddet.
+    Matrix.Log('BUREAU', '[SEC-6][SP-ATOMIK] Bilinmeyen result_code=%s -- islem reddedildi (fail-closed).', tostring(code))
+    return false, 'sp_unknown_result'
 end
 
 exports('ProcessBribeCryptoTransaction', function(walletAddress, amount, targetIdentifier)

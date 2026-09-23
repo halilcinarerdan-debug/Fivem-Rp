@@ -140,7 +140,7 @@ end)
 -- /hubata [trapHouseId] [label] [x] [y] [z] -- F10 client menüsü henüz bu
 -- resource'ta değilken de sunucu tarafını test etmek için (bkz. /traphouseekle
 -- İLE AYNI disiplin: boşlukla ayrılmış argümanlar, virgül YOK).
-RegisterCommand('hubata', function(src, args)
+Matrix.Security.RegisterGatedCommand('hubata', function(src, args)
     local trapHouseId = tonumber(args[1])
     local label        = args[2]
     local x, y, z       = tonumber(args[3]), tonumber(args[4]), tonumber(args[5])
@@ -154,9 +154,9 @@ RegisterCommand('hubata', function(src, args)
     else
         Reply(src, 'Hub atama istegi gonderildi (async). /hublistele ile dogrulayin.')
     end
-end, false)
+end)
 
-RegisterCommand('hublistele', function(src)
+Matrix.Security.RegisterGatedCommand('hublistele', function(src)
     local count = 0
     for id, hub in pairs(Hubs) do
         count = count + 1
@@ -164,7 +164,7 @@ RegisterCommand('hublistele', function(src)
             id, hub.trap_house_id, hub.label, tostring(hub.active), tostring(hub.locked)))
     end
     Reply(src, ('--- Toplam %d hub ---'):format(count))
-end, false)
+end)
 
 
 -- ★ KATMAN 7 FAZ 2: F10 "Otonom Depo Lojistigi" paneli. getRegionalFinancialReport

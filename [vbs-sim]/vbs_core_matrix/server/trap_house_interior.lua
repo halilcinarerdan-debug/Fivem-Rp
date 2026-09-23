@@ -453,7 +453,7 @@ end)
 -- =====================================================================
 -- TAKTİK DEBUG PANELİ
 -- =====================================================================
-RegisterCommand('interiordurum', function(src)
+Matrix.Security.RegisterGatedCommand('interiordurum', function(src)
     local count = 0
     for trapHouseId, set in pairs(Occupants) do
         local n = 0
@@ -474,7 +474,7 @@ RegisterCommand('interiordurum', function(src)
         Reply(src, ('Bot #%d trap house #%d deposunda (Cikis Koprusu bekliyor, ped yok)'):format(botId, trapHouseId), true)
     end
     Reply(src, ('--- Toplam %d bot depo isleminde ---'):format(stashCount), true)
-end, false)
+end)
 
 
 exports('GetTrapHouseBucket', function(trapHouseId) return Matrix.TrapHouseInterior.GetBucket(trapHouseId) end)

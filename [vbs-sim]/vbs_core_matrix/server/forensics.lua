@@ -647,6 +647,46 @@ end
 
 
 -- =====================================================================
+-- ★ DÜŞMAN TRAP HOUSE KAPI KIRMA ADLİ İZİ (breaching_tool)
+-- server/door_reinforcement.lua Matrix.Forensics.RecordBreachToolMarks'ı
+-- BAŞARILI bir kırma tamamlandığında (pcall'lı, bu dosya yüklenmemiş
+-- olsa bile o dosya çökmez) çağırır. matrix_forensic_evidence'a
+-- YAZILAMAZ (ballistic_id FK NOT NULL, kırma olayının bir balistik
+-- kaydı yoktur) -- bu yüzden AYRI, kendi INDEX'li tablosu vardır
+-- (matrix_breach_forensics, bkz. sql/matrix_financial_core.sql).
+-- =====================================================================
+function Matrix.Forensics.RecordBreachToolMarks(src, trapHouseId, toolItemName)
+    local actor = Matrix.ResolveActor(src)
+    if not actor then return false end
+
+    local dna = GetActorDnaId(actor)
+    local q   = Matrix.Forensics.ComputeFingerprintQuality(actor)
+
+    local ok = pcall(function()
+        MySQL.prepare([[
+            INSERT INTO matrix_breach_forensics
+                (trap_house_id, tool_item, fingerprint_id, tool_mark_quality, created_at)
+            VALUES (?, ?, ?, ?, NOW())
+        ]], { tonumber(trapHouseId) or 0, tostring(toolItemName), dna, q })
+    end)
+
+    if ok then
+        Matrix.Log('FORENSICS',
+            '[KIRMA ADLI IZI] Trap #%s | Alet:%s | Parmak Izi Kalitesi:%.3f | DNA:%s',
+            tostring(trapHouseId), tostring(toolItemName), q, tostring(dna))
+    else
+        Matrix.Log('FORENSICS', '[HATA] RecordBreachToolMarks INSERT basarisiz (yutuldu).')
+    end
+
+    return ok
+end
+
+exports('RecordBreachToolMarks', function(src, trapHouseId, toolItemName)
+    return Matrix.Forensics.RecordBreachToolMarks(src, trapHouseId, toolItemName)
+end)
+
+
+-- =====================================================================
 -- LAB ANALYSIS
 -- =====================================================================
 function Matrix.Forensics.AnalyzeEvidence(evidenceId)
@@ -895,7 +935,7 @@ local function Reply(src, msg)
 end
 
 
-RegisterCommand('forensicdump', function(src, args)
+Matrix.Security.RegisterGatedCommand('forensicdump', function(src, args)
     local ballisticId = args[1]
     if type(ballisticId) ~= 'string' then Reply(src, 'Kullanim: /forensicdump [ballisticId]'); return end
 
@@ -907,7 +947,8 @@ RegisterCommand('forensicdump', function(src, args)
 
     Reply(src, ('Silah: %s | Seri:%s | Aşınma:%.3f | Mühür:%s | Kesinlik:%s'):format(
         weapon.ballistic_id, weapon.weapon_serial, weapon.wear_level,
-        tostring(weapon.sealed_as_crime_weapon == 1), tostring(weapon.seal_certainty)))
+        Matrix.FormatMilSimStatus(weapon.sealed_as_crime_weapon == 1, '🔒 SIZDIRMAZ (Suç Silahı)', '🟢 MÜHÜRSÜZ'),
+        tostring(weapon.seal_certainty)))
 
 
     local evidenceRows = MySQL.query.await(
@@ -916,12 +957,13 @@ RegisterCommand('forensicdump', function(src, args)
     Reply(src, ('--- %d kanıt satırı (en yeni 10) ---'):format(#evidenceRows))
     for _, ev in ipairs(evidenceRows) do
         Reply(src, ('  #%d [%s] Striasyon:%.3f Eşleşme:%.3f Mühür:%s'):format(
-            ev.id, ev.evidence_type, ev.striation_quality, ev.match_certainty, tostring(ev.sealed_as_crime_weapon == 1)))
+            ev.id, ev.evidence_type, ev.striation_quality, ev.match_certainty,
+            Matrix.FormatMilSimStatus(ev.sealed_as_crime_weapon == 1, '🔒 SIZDIRMAZ', '🟢 MÜHÜRSÜZ')))
     end
-end, false)
+end)
 
 
-RegisterCommand('forensicrapor', function(src, args)
+Matrix.Security.RegisterGatedCommand('forensicrapor', function(src, args)
     local evidenceId = tonumber(args[1])
     if not evidenceId then Reply(src, 'Kullanim: /forensicrapor [evidenceId]'); return end
 
@@ -942,10 +984,10 @@ RegisterCommand('forensicrapor', function(src, args)
     })
     print(report)
     Reply(src, ('Kanıt #%d raporu konsola basıldı.'):format(evidenceId))
-end, false)
+end)
 
 
-RegisterCommand('asinmaayarla', function(src, args)
+Matrix.Security.RegisterGatedCommand('asinmaayarla', function(src, args)
     local serial = args[1]
     local wear = Matrix.Clamp(tonumber(args[2]) or 0.0, 0.0, 1.0)
     if type(serial) ~= 'string' then Reply(src, 'Kullanim: /asinmaayarla [seri] [0.0-1.0]'); return end
@@ -958,7 +1000,7 @@ RegisterCommand('asinmaayarla', function(src, args)
     cached.wear_level = wear
     MySQL.prepare('UPDATE matrix_ballistic_weapons SET wear_level = ? WHERE weapon_serial = ?', { wear, serial })
     Reply(src, ('%s aşınması %.3f olarak ayarlandı.'):format(serial, wear))
-end, false)
+end)
 
 
 RegisterCommand('silahasindir', function(src, args)
@@ -1527,7 +1569,15 @@ RegisterNetEvent('matrix:server:forensics:hackCCTV', function(zoneId)
 end)
 
 
-RegisterCommand('kovantopla', function(src, args)
+-- ★ [SEC] kovantopla/mobesehackle/cctvkaydet/kanitsabotaj admin-only:
+-- hepsi ya keyfi/oyuncu-beyanlı koordinat kabul ediyor (kovantopla botun
+-- GERÇEK konumu yerine args'tan gelen x/y/z kullanır -- botu fiilen
+-- oraya HİÇ götürmeden uzaktan kanıt silinebiliyordu), ya da hiçbir
+-- yakınlık/maliyet kontrolü olmadan sivil kardeşi (kameralogutemizle'nin
+-- router yakınlık şartı) kadar kısıtlı değil, ya da doğrudan "(test)"
+-- olarak etiketlenmiş/gerçek rüşvet akışını (rusvetteklifi) tamamen
+-- atlıyor (kanitsabotaj).
+Matrix.Security.RegisterGatedCommand('kovantopla', function(src, args)
     local botId = tonumber(args[1])
     local x, y, z = tonumber(args[2]), tonumber(args[3]), tonumber(args[4])
     if not botId or not x or not y or not z then
@@ -1541,10 +1591,10 @@ RegisterCommand('kovantopla', function(src, args)
     else
         Reply(src, ('Basarisiz: %s'):format(tostring(result)))
     end
-end, false)
+end)
 
 
-RegisterCommand('mobesehackle', function(src, args)
+Matrix.Security.RegisterGatedCommand('mobesehackle', function(src, args)
     local zoneId = tonumber(args[1])
     if not zoneId then Reply(src, 'Kullanim: /mobesehackle [zoneId]'); return end
 
@@ -1555,10 +1605,10 @@ RegisterCommand('mobesehackle', function(src, args)
     else
         Reply(src, ('Basarisiz: %s'):format(tostring(result)))
     end
-end, false)
+end)
 
 
-RegisterCommand('cctvkaydet', function(src, args)
+Matrix.Security.RegisterGatedCommand('cctvkaydet', function(src, args)
     local zoneId = tonumber(args[1])
     local dnaId  = args[2]
     local masked = tonumber(args[3]) == 1
@@ -1571,10 +1621,10 @@ RegisterCommand('cctvkaydet', function(src, args)
     MySQL.insert('INSERT INTO matrix_cctv_logs (zone_id, dna_id, masked, clothing_tag, created_at) VALUES (?, ?, ?, ?, NOW())',
         { zoneId, dnaId, masked and 1 or 0, tag })
     Reply(src, 'Mobese kaydi eklendi (test).')
-end, false)
+end)
 
 
-RegisterCommand('kanitsabotaj', function(src, args)
+Matrix.Security.RegisterGatedCommand('kanitsabotaj', function(src, args)
     local officerCitizenId = args[1]
     local caseId            = args[2]
     if type(officerCitizenId) ~= 'string' or type(caseId) ~= 'string' then
@@ -1588,7 +1638,7 @@ RegisterCommand('kanitsabotaj', function(src, args)
     else
         Reply(src, ('Basarisiz: %s'):format(tostring(result)))
     end
-end, false)
+end)
 
 
 exports('CollectShells', function(botId, coords) return Matrix.Forensics.CollectShells(botId, coords) end)
@@ -1600,45 +1650,18 @@ end)
 
 -- =====================================================================
 -- KATMAN 8 — CEPHE C2: ADLİ DELİL ASİMPTOTİK ERİMESİ
+--
+-- ★ ADLİ BULGU (bu oturumda tespit edildi): Bu blok, aşağıdaki [FAZ 3]
+-- bloğuyla BİREBİR AYNI decay formülünü uygulayan, HİÇBİR thread
+-- tarafından çağrılmayan (yalnızca dışa export edilmiş) bir "hayalet"
+-- ikinci kopyaydı -- server/phone_bridge.lua'daki remoteWipe duplikasyonu
+-- ile AYNI SINIF hata. Dış bir kaynak `exports.vbs_core_matrix:
+-- TickEvidenceDecay()` çağırsaydı, [FAZ 3]'ün KENDİ bağımsız epoch
+-- izleyicisinden (ayrı _lastEvidenceDecayEpoch) habersiz İKİNCİ bir erime
+-- turu uygulanır, kanıt kalitesi belgelenen tek asimptotik eğriden DAHA
+-- HIZLI erirdi. Tek otorite artık aşağıdaki [FAZ 3] bloğudur; bu kopya
+-- kaldırıldı.
 -- =====================================================================
-
-local _EVIDENCE_DECAY_TICK_MS = 60 * 60 * 1000
-local _EVIDENCE_DECAY_RATE    = 0.002
-local _lastDecayTickEpoch     = nil
-
-function Matrix.Forensics.TickEvidenceDecay()
-    local nowEpoch = os.time()
-
-    local deltaMinutes
-    if _lastDecayTickEpoch then
-        deltaMinutes = math.max((nowEpoch - _lastDecayTickEpoch) / 60.0, 0.0)
-    else
-        deltaMinutes = _EVIDENCE_DECAY_TICK_MS / 60000.0
-    end
-    _lastDecayTickEpoch = nowEpoch
-
-    if deltaMinutes <= 0.0 then return end
-
-    local decayFactor = math.exp(-_EVIDENCE_DECAY_RATE * deltaMinutes)
-
-    local ok, affected = pcall(function()
-        return MySQL.update.await([[
-            UPDATE matrix_forensic_evidence
-            SET striation_quality   = GREATEST(0.0, LEAST(1.0, striation_quality   * ?)),
-                fingerprint_quality = GREATEST(0.0, LEAST(1.0, fingerprint_quality * ?))
-            WHERE sealed_as_crime_weapon = 0
-        ]], { decayFactor, decayFactor })
-    end)
-    if ok then
-        Matrix.Log('FORENSICS',
-            '[ADLİ DELİL ERİMESİ] Mühürsüz kanıt delta-bazlı erimeye tabi tutuldu (delta=%.2fdk faktor=%.4f etkilenen=%s).',
-            deltaMinutes, decayFactor, tostring(affected or '?'))
-    else
-        Matrix.Log('FORENSICS', '[HATA] TickEvidenceDecay UPDATE basarisiz (yutuldu).')
-    end
-end
-
-exports('TickEvidenceDecay', function() return Matrix.Forensics.TickEvidenceDecay() end)
 
 -- =====================================================================
 -- ★ [FAZ 3] SAATLİK ASİMPTOTİK KANIT ERİMESİ
