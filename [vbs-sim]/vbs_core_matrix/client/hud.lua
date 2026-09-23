@@ -855,7 +855,22 @@ end
 local OpenAssignInspectorDialog -- ileri bildirim (OpenBotActionsMenu tarafından kullanilir)
 local OpenBotInventoryOpsMenu   -- ★ KATMAN 6: ileri bildirim
 local OpenGiveItemToBotDialog   -- ★ KATMAN 6: ileri bildirim
+local OpenTakeItemFromBotDialog -- ★ [Aşama 3]: ileri bildirim
 local OpenAmmoRunDialog         -- ★ KATMAN 7 [T2]: ileri bildirim
+local OpenGuardCommandMenu      -- ★ [Aşama 2]: ileri bildirim (Arma 3 tarzı)
+local OpenMyAgentRosterMenu     -- ★ [Aşama 2]: ileri bildirim
+local OpenLogisticsWizard       -- ★ [Aşama 7]: ileri bildirim
+local OpenMainCommandMenu       -- ★ [Aşama 2]: ileri bildirim (F10 kök menüsü)
+
+
+--- Sunucunun onayladığı Bot ID/rumuz'u kullanıcıya ID YAZDIRMADAN seçtirir
+--- -- tüm F10 alt menüleri bu yardımcıyı kullanır (kullanıcı isteği: "id
+--- şeklinde değil seçenek sunsun").
+local function AwaitMyAgentRoster()
+    local ok, roster = pcall(function() return lib.callback.await('matrix:callback:getMyAgentRoster', false) end)
+    if not ok or type(roster) ~= 'table' then return {} end
+    return roster
+end
 
 -- [FAZ 1] Darkchat parola sonucu
 RegisterNetEvent('matrix:client:darkchat:passphraseResult', function(ok, reason, trapHouseId)
@@ -896,3 +911,364 @@ end)
 -- [FAZ 4] Panik butonu tetikleyici (herhangi bir client tetikleyicisi:
 -- örn. telefon UI'nin bir butonu bu event'i çağırır):
 -- TriggerServerEvent('matrix:server:phone:remoteWipe', nil) -- nil = kendi dna_id
+
+
+-- =====================================================================
+-- ★ [Aşama 1] TAKIM NAMETAG'İ — muhafız takipçileri (client/
+-- mercenary_followers.lua Matrix.Client.Followers) ve trap house'taki
+-- kendi ajanlarımız (client/trap_house_client.lua Matrix.Client.ResidentBots)
+-- üzerinde rumuz gösterir. Config.Hud.ShowTeamNametags ile kapatılabilir.
+-- =====================================================================
+local function DrawNametagAt(coords, text)
+    if not Config.Hud.ShowTeamNametags then return end
+    local dist = #(GetEntityCoords(PlayerPedId()) - coords)
+    if dist > (Config.Hud.NametagRange or 30.0) then return end
+
+    SetDrawOrigin(coords.x, coords.y, coords.z + 1.0, 0)
+    SetTextFont(4)
+    SetTextScale(0.32, 0.32)
+    SetTextColour(120, 255, 160, 220)
+    SetTextOutline()
+    SetTextCentre(true)
+    BeginTextCommandDisplayText('STRING')
+    AddTextComponentSubstringPlayerName(text)
+    EndTextCommandDisplayText(0.0, 0.0)
+    ClearDrawOrigin()
+end
+
+CreateThread(function()
+    while true do
+        Wait(0)
+        if Config.Hud.ShowTeamNametags then
+            local followers = Matrix.Client and Matrix.Client.Followers
+            if followers then
+                for _, entry in ipairs(followers) do
+                    if entry.ped and DoesEntityExist(entry.ped) then
+                        local label = (Config.Hud.NametagLabel or '~b~%s ~w~[%s]'):format(
+                            entry.displayName or 'Muhafiz', entry.mode or 'follow')
+                        DrawNametagAt(GetEntityCoords(entry.ped), label)
+                    end
+                end
+            end
+
+            local residents = Matrix.Client and Matrix.Client.ResidentBots
+            if residents then
+                for _, entry in ipairs(residents) do
+                    if entry.ped and DoesEntityExist(entry.ped) then
+                        DrawNametagAt(GetEntityCoords(entry.ped), entry.displayName or 'Ajan')
+                    end
+                end
+            end
+        else
+            Wait(1000)
+        end
+    end
+end)
+
+
+-- =====================================================================
+-- ★ [Aşama 3] ENVANTER: VER / GERİ AL
+-- =====================================================================
+OpenGiveItemToBotDialog = function(botId)
+    local ok, items = pcall(function() return exports['ox_inventory']:GetPlayerItems() end)
+    if not ok or type(items) ~= 'table' then
+        NotifyInvalidInput('Envanter okunamadi.'); return
+    end
+
+    local options = {}
+    for slot, item in pairs(items) do
+        if type(item) == 'table' and item.name then
+            options[#options + 1] = { value = tostring(item.slot or slot), label = ('%s x%d'):format(item.label or item.name, item.count or 1) }
+        end
+    end
+    if #options == 0 then
+        if lib and lib.notify then lib.notify({ title = '[ENVANTER]', description = 'Verilecek esyaniz yok.', type = 'inform' }) end
+        return
+    end
+
+    local input = lib.inputDialog('Bota Esya Ver', {
+        { type = 'select', label = 'Esya', required = true, options = options },
+        { type = 'number', label = 'Adet', required = true, min = 1, max = 9999, default = 1 }
+    })
+    if not input then return end
+
+    local slot = SanitizeNumericArg(input[1], 1, 999999)
+    local count = SanitizeNumericArg(input[2], 1, 9999)
+    if not slot or not count then NotifyInvalidInput('Gecersiz secim/adet.'); return end
+
+    TriggerServerEvent('matrix:server:trapHouseInterior:giveItemToBot', botId, slot, count)
+end
+
+--- ★ [Aşama 3] SADECE VERME değil — botun envanterinden GERİ ALMA.
+OpenTakeItemFromBotDialog = function(botId)
+    local ok, items = pcall(function() return lib.callback.await('matrix:callback:getBotInventoryItems', false, botId) end)
+    if not ok or type(items) ~= 'table' or #items == 0 then
+        if lib and lib.notify then lib.notify({ title = '[ENVANTER]', description = 'Botun envanteri bos.', type = 'inform' }) end
+        return
+    end
+
+    local options = {}
+    for _, item in ipairs(items) do
+        options[#options + 1] = { value = tostring(item.slot), label = ('%s x%d'):format(item.label or item.name, item.count or 1) }
+    end
+
+    local input = lib.inputDialog('Bottan Esya Geri Al', {
+        { type = 'select', label = 'Esya', required = true, options = options },
+        { type = 'number', label = 'Adet', required = true, min = 1, max = 9999, default = 1 }
+    })
+    if not input then return end
+
+    local slot = SanitizeNumericArg(input[1], 1, 999999)
+    local count = SanitizeNumericArg(input[2], 1, 9999)
+    if not slot or not count then NotifyInvalidInput('Gecersiz secim/adet.'); return end
+
+    TriggerServerEvent('matrix:server:trapHouseInterior:takeItemFromBot', botId, slot, count)
+end
+
+OpenBotInventoryOpsMenu = function(botId, displayName)
+    lib.registerContext({
+        id = 'matrix_bot_inventory_ops',
+        title = ('%s — Envanter'):format(displayName or ('Bot #' .. botId)),
+        menu = 'matrix_agent_actions_' .. botId,
+        options = {
+            { title = 'Ver',      description = 'Kendi envanterinizden bota esya verin', icon = 'arrow-right', onSelect = function() OpenGiveItemToBotDialog(botId) end },
+            { title = 'Geri Al',  description = 'Botun envanterinden kendinize alin',      icon = 'arrow-left',  onSelect = function() OpenTakeItemFromBotDialog(botId) end }
+        }
+    })
+    lib.showContext('matrix_bot_inventory_ops')
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 4] MASKE / ELDİVEN — interaktif tak/çıkar (delil azaltma)
+-- =====================================================================
+local function ToggleOwnGloves(worn)
+    TriggerServerEvent('matrix:server:forensics:setGlovesWorn', worn)
+end
+
+local function ToggleOwnMask(worn)
+    TriggerServerEvent('matrix:server:forensics:setMaskWorn', worn)
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 2] ARMA 3 TARZI KOMUTA MENÜSÜ — F10'dan bir muhafız seçilince.
+-- Kasıtlı olarak "suppressive fire" gibi gerçekçi olmayan bir mod
+-- EKLENMEDİ — Takip/Bekle/Koru/Saldır/Gözlem gerçek Arma 3 emirleridir.
+-- =====================================================================
+OpenGuardCommandMenu = function(botId, displayName)
+    local function SendMode(mode)
+        local ped = PlayerPedId()
+        local coords = GetEntityCoords(ped)
+        TriggerServerEvent('matrix:server:mercenary:setFollowerMode', botId, mode, coords)
+    end
+
+    lib.registerContext({
+        id = 'matrix_guard_command_menu',
+        title = ('%s — Komuta'):format(displayName or ('Muhafiz #' .. botId)),
+        menu = 'matrix_agent_actions_' .. botId,
+        options = {
+            { title = 'Takip Et',  description = 'Sizi takip eder, araca otonom biner', icon = 'person-walking', onSelect = function() SendMode('follow') end },
+            { title = 'Bekle (Hold Position)', description = 'Bulunduğunuz noktada bekler', icon = 'hand', onSelect = function() SendMode('hold') end },
+            { title = 'Bu Noktayı Koru (Guard)', description = 'Noktayı korur, yaklaşan tehditle çatışır', icon = 'shield', onSelect = function() SendMode('guard') end },
+            { title = 'Saldır (Attack)', description = 'En yakın düşmanı aktif olarak avlar', icon = 'crosshairs', onSelect = function() SendMode('attack') end },
+            { title = 'Gözlem Yap (Observe)', description = 'Ateş ETMEZ — yalnızca izler/pozisyonda kalır', icon = 'eye', onSelect = function() SendMode('observe') end }
+        }
+    })
+    lib.showContext('matrix_guard_command_menu')
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 5 ULTIMATE [U2] tamamlandı: Denetleyici Ata (/denetleyiciata)
+-- id yazdırmak yerine Config.Market.Zones'tan seçilebilir bölge listesi.
+-- =====================================================================
+OpenAssignInspectorDialog = function(botId)
+    local options = {}
+    for _, zone in ipairs(Config.Market and Config.Market.Zones or {}) do
+        options[#options + 1] = { value = tostring(zone.id), label = zone.label or ('Bolge #' .. zone.id) }
+    end
+    if #options == 0 then NotifyInvalidInput('Tanimli bolge yok.'); return end
+
+    local input = lib.inputDialog('Bolge Denetleyicisi Ata', {
+        { type = 'select', label = 'Bolge', required = true, options = options }
+    })
+    if not input then return end
+
+    local zoneId = SanitizeNumericArg(input[1], 1, 2147483646)
+    if not zoneId then NotifyInvalidInput('Bolge secimi gecersiz.'); return end
+
+    ExecuteCommand(('denetleyiciata %s %s'):format(zoneId, botId))
+end
+
+
+-- =====================================================================
+-- ★ KATMAN 7 [T2]: Mühimmat Koşusu — id yazdırmadan, kadrodan seçerek.
+-- =====================================================================
+OpenAmmoRunDialog = function()
+    local roster = AwaitMyAgentRoster()
+    if #roster == 0 then NotifyInvalidInput('Kayitli ajaniniz yok.'); return end
+
+    local options = {}
+    for _, a in ipairs(roster) do
+        options[#options + 1] = { value = tostring(a.botId), label = ('%s (%s) — %s'):format(a.displayName, a.roleLabel, a.trapHouseLabel) }
+    end
+
+    local input = lib.inputDialog('Muhimmat Kosusu', {
+        { type = 'select', label = 'Lojistik/Kaynak Bot', required = true, options = options },
+        { type = 'select', label = 'Hedef Bot', required = true, options = options }
+    })
+    if not input then return end
+
+    local sourceBotId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    local targetBotId = SanitizeNumericArg(input[2], 1, MAX_BOT_ID)
+    if not sourceBotId or not targetBotId then NotifyInvalidInput('Gecersiz bot secimi.'); return end
+
+    ExecuteCommand(('muhimmatsevk %s %s'):format(sourceBotId, targetBotId))
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 7] LOJİSTİK SİHİRBAZI — mevcut /filokaydet, /filoata,
+-- /bagajyukle, /sevket komutlarını TEK bir F10 akışında zincirler. Yeni
+-- iş mantığı YOK — yalnızca UI konsolidasyonu (server/logistics.lua
+-- export'ları DEĞİŞTİRİLMEDİ).
+-- =====================================================================
+OpenLogisticsWizard = function()
+    local roster = AwaitMyAgentRoster()
+    if #roster == 0 then NotifyInvalidInput('Kayitli ajaniniz yok.'); return end
+
+    local options = {}
+    for _, a in ipairs(roster) do
+        options[#options + 1] = { value = tostring(a.botId), label = ('%s (%s) — %s'):format(a.displayName, a.roleLabel, a.trapHouseLabel) }
+    end
+
+    local input = lib.inputDialog('Sevkiyat Sihirbazi', {
+        { type = 'select', label = 'Kurye Bot', required = true, options = options },
+        { type = 'input',  label = 'Plaka (bos = yayan)', required = false, max = MAX_PLATE_LEN },
+        { type = 'select', label = 'Arac Tipi', required = true, options = BuildVehicleTypeOptions() }
+    })
+    if not input then return end
+
+    local botId = SanitizeNumericArg(input[1], 1, MAX_BOT_ID)
+    if not botId then NotifyInvalidInput('Gecersiz bot secimi.'); return end
+
+    local plate = SanitizePlateArg(input[2])
+    if plate == nil then NotifyInvalidInput('Plaka gecersiz.'); return end
+
+    local vehicleType = SanitizeVehicleTypeArg(input[3])
+    if not vehicleType then NotifyInvalidInput('Arac tipi gecersiz.'); return end
+
+    -- Oyuncunun bulunduğu nokta teslimat hedefi olarak kullanılır (mevcut
+    -- /sevket davranışıyla AYNI — bkz. dosya başı notu).
+    ExecuteCommand(('sevket %s %s'):format(botId, (plate ~= '' and plate) or vehicleType))
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 2] BOT AKSİYON MENÜSÜ — "Kadro Listesi"ndeki bir ajana
+-- tıklandığında açılır. Role göre farklı seçenekler sunar (id DEĞİL,
+-- her zaman seçilebilir bir liste).
+-- =====================================================================
+local function OpenBotActionsMenu(agent)
+    local options = {}
+
+    if agent.role == 'guard' then
+        options[#options + 1] = { title = 'Komuta Ver', description = ('Su anki mod: %s'):format(agent.guardMode or 'follow'), icon = 'diagram-project', onSelect = function() OpenGuardCommandMenu(agent.botId, agent.displayName) end }
+    elseif agent.role ~= 'inspector' then
+        options[#options + 1] = { title = 'Bolge Denetleyicisi Ata', icon = 'user-shield', onSelect = function() OpenAssignInspectorDialog(agent.botId) end }
+    end
+
+    options[#options + 1] = { title = 'Envanter (Ver / Geri Al)', description = 'Bota esya verin ya da geri alin', icon = 'boxes-stacked', onSelect = function() OpenBotInventoryOpsMenu(agent.botId, agent.displayName) end }
+    options[#options + 1] = { title = 'Maske Tak',    icon = 'mask',  onSelect = function() TriggerServerEvent('matrix:server:forensics:setMaskWorn', true) end }
+    options[#options + 1] = { title = 'Maske Cikar',  icon = 'mask',  onSelect = function() TriggerServerEvent('matrix:server:forensics:setMaskWorn', false) end }
+    options[#options + 1] = { title = 'Trap House\'a Git', description = agent.trapHouseLabel, icon = 'route', onSelect = function() OpenTrapHouseWaypointDialog() end }
+
+    lib.registerContext({
+        id = 'matrix_agent_actions_' .. agent.botId,
+        title = ('%s [%s] — %s'):format(agent.displayName, agent.roleLabel, agent.status),
+        menu = 'matrix_my_agent_roster',
+        options = options
+    })
+    lib.showContext('matrix_agent_actions_' .. agent.botId)
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 2] "KADRO LİSTESİ" — kullanıcının KENDİ ajanları, her satırda
+-- rumuz + rol + HANGİ TRAP HOUSE'TA olduğu (id yazma yerine tıklanabilir
+-- liste — kullanıcı isteği).
+-- =====================================================================
+OpenMyAgentRosterMenu = function()
+    local roster = AwaitMyAgentRoster()
+
+    local options = {}
+    if #roster == 0 then
+        options[#options + 1] = { title = 'Kayitli ajaniniz yok', description = 'Once Muhafiz Cagir veya bir kurye devsirin.', disabled = true }
+    else
+        for _, a in ipairs(roster) do
+            options[#options + 1] = {
+                title = a.displayName,
+                description = ('%s | %s | %s'):format(a.roleLabel, a.trapHouseLabel, a.status),
+                icon = (a.role == 'guard') and 'user-shield' or 'user',
+                onSelect = function() OpenBotActionsMenu(a) end
+            }
+        end
+    end
+
+    lib.registerContext({
+        id = 'matrix_my_agent_roster',
+        title = 'Kadro Listesi',
+        menu = 'matrix_main_command_menu',
+        options = options
+    })
+    lib.showContext('matrix_my_agent_roster')
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 2] F10 KÖK MENÜSÜ — önemli komutlar burada toplanır, oyuncu
+-- id yazmak/komut ezberlemek ZORUNDA kalmaz. Mevcut tüm F10 dialoglari
+-- ("Diger Komutlar" alt menüsünde) KORUNUR — hiçbiri kaldırılmadı.
+-- =====================================================================
+OpenMainCommandMenu = function()
+    lib.registerContext({
+        id = 'matrix_other_commands_menu',
+        title = 'Diger Komutlar',
+        menu = 'matrix_main_command_menu',
+        options = {
+            { title = 'Trap House Durumu',       icon = 'house',        onSelect = OpenTrapHouseDurumDialog },
+            { title = 'Kapi Surgu Tahkimati',     icon = 'door-closed',  onSelect = OpenDoorReinforcementDialog },
+            { title = 'Rutbe Ata',                 icon = 'ranking-star', onSelect = OpenRutbeAtaDialog },
+            { title = 'Rota Ciz (Multi-Waypoint)', icon = 'route',        onSelect = OpenRotaCizDialog },
+            { title = 'Muhimmat Kosusu',           icon = 'truck',        onSelect = OpenAmmoRunDialog },
+            { title = 'Namlu Degistir',            icon = 'gun',          onSelect = OpenNamluDegistirAction },
+            { title = 'Tezgahta Tamir Et',         icon = 'wrench',       onSelect = OpenWorkbenchRepairAction },
+            { title = 'Matrix Dump (Teshis)',      icon = 'terminal',     onSelect = OpenMatrixDump }
+        }
+    })
+
+    lib.registerContext({
+        id = 'matrix_main_command_menu',
+        title = 'Taktik Komuta Menusu (F10)',
+        options = {
+            { title = 'Kadro Listesi',        description = 'Kendi ajanlariniz — hangi trap house\'ta oldugu dahil', icon = 'users',        onSelect = OpenMyAgentRosterMenu },
+            { title = 'Muhafiz Cagir',         description = 'Kalici kimlikli fiziksel muhafiz/kurye cagirir',        icon = 'user-plus',    onSelect = function() ExecuteCommand('muhafizcagir') end },
+            { title = 'Muhafizlari Serbest Birak', icon = 'user-minus', onSelect = function() ExecuteCommand('muhafizsalla') end },
+            { title = 'Sevkiyat Sihirbazi',    description = 'Bot + arac + plaka tek akista, tek seferde',           icon = 'truck-fast',   onSelect = OpenLogisticsWizard },
+            { title = 'Trap House\'a Git',      icon = 'map-pin',      onSelect = OpenTrapHouseWaypointDialog },
+            { title = 'Eldiven Tak',           description = 'Parmak izi kalitesini dusurur — envanterde eldiven gerekir', icon = 'hand',    onSelect = function() ToggleOwnGloves(true) end },
+            { title = 'Eldiven Cikar',         icon = 'hand',          onSelect = function() ToggleOwnGloves(false) end },
+            { title = 'Maske Tak',             description = 'Mobese karartma/kimliksizlestirme ile entegre calisir', icon = 'mask',        onSelect = function() ToggleOwnMask(true) end },
+            { title = 'Maske Cikar',           icon = 'mask',          onSelect = function() ToggleOwnMask(false) end },
+            { title = 'Diger Komutlar',        description = 'Tahkimat, rutbe, rota, teshis vb. — hicbiri kaldirilmadi', icon = 'ellipsis', onSelect = function() lib.showContext('matrix_other_commands_menu') end }
+        }
+    })
+
+    lib.showContext('matrix_main_command_menu')
+end
+
+RegisterCommand('matrixf10', function()
+    OpenMainCommandMenu()
+end, false)
+RegisterKeyMapping('matrixf10', 'Taktik Komuta Menusu', 'keyboard', Config.Hud.CommandMenuKey or 'F10')

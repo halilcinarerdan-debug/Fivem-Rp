@@ -49,6 +49,12 @@ local RESIDENT_BOT_PED_MODEL = 'g_m_y_famdnf_01'
 local sellerPeds  = {} -- handoffId -> { entity, coords, radius }
 local ambushPeds  = {}
 
+-- ★ hud.lua (nametag çizimi) için paylaşılan tablo -- AYNI Lua VM'inde
+-- çalışan bir client script olduğundan doğrudan Matrix.Client altında
+-- yayınlanır. Yeniden atanmaz (table.remove ile boşaltılır).
+Matrix.Client = Matrix.Client or {}
+Matrix.Client.ResidentBots = Matrix.Client.ResidentBots or {}
+
 
 -- =====================================================================
 -- YARDIMCI ÇİZİM (monokrom, DrawText — client/hud.lua DrawMonoLine ile
@@ -272,24 +278,33 @@ RegisterNetEvent('matrix:client:trapHouseInterior:teleportIn', function(data)
     if type(data.resident_bots) == 'table' and #data.resident_bots > 0 and shellData.workbench_pos then
         CreateThread(function()
             local scenarios = data.ambient_scenarios or { 'WORLD_HUMAN_SMOKING', 'WORLD_HUMAN_STAND_IMPATIENT', 'WORLD_HUMAN_LEANING' }
-            local model = RequestModelSync(RESIDENT_BOT_PED_MODEL)
-            if not model then return end
-
 
             for i, botInfo in ipairs(data.resident_bots) do
-                local offsetX = ((i % 5) - 2) * 1.4
-                local offsetY = math.floor(i / 5) * 1.4
-                local base = data.workbench_pos
-                local px, py, pz = base.x + offsetX, base.y + offsetY, base.z
-                local ped = CreatePed(4, model, px, py, pz, 0.0, false, false)
-                if ped and ped ~= 0 then
-                    SetEntityAsMissionEntity(ped, true, true)
-                    SetBlockingOfNonTemporaryEvents(ped, true)
-                    TaskStartScenarioInPlace(ped, scenarios[((i - 1) % #scenarios) + 1], 0, true)
-                    residentPeds[#residentPeds + 1] = ped
+                -- ★ Aşama 0: sabit RESIDENT_BOT_PED_MODEL yerine botun KENDİ
+                -- kalıcı ped modeli (server/main.lua Matrix.ResolveBotIdentity)
+                -- kullanılır -- model yoksa AYNI eski sabit modele düşülür.
+                local modelName = (type(botInfo) == 'table' and botInfo.ped_model) or RESIDENT_BOT_PED_MODEL
+                local model = RequestModelSync(modelName)
+                if model then
+                    local offsetX = ((i % 5) - 2) * 1.4
+                    local offsetY = math.floor(i / 5) * 1.4
+                    local base = data.workbench_pos
+                    local px, py, pz = base.x + offsetX, base.y + offsetY, base.z
+                    local ped = CreatePed(4, model, px, py, pz, 0.0, false, false)
+                    if ped and ped ~= 0 then
+                        SetEntityAsMissionEntity(ped, true, true)
+                        SetBlockingOfNonTemporaryEvents(ped, true)
+                        TaskStartScenarioInPlace(ped, scenarios[((i - 1) % #scenarios) + 1], 0, true)
+                        residentPeds[#residentPeds + 1] = ped
+                        Matrix.Client.ResidentBots[#Matrix.Client.ResidentBots + 1] = {
+                            ped = ped,
+                            botId = type(botInfo) == 'table' and botInfo.id or nil,
+                            displayName = (type(botInfo) == 'table' and botInfo.display_name) or 'Ajan'
+                        }
+                    end
+                    SetModelAsNoLongerNeeded(model)
                 end
             end
-            SetModelAsNoLongerNeeded(model)
         end)
     end
 
@@ -307,6 +322,7 @@ local function CleanupResidentPeds()
         end
     end
     residentPeds = {}
+    for i = #Matrix.Client.ResidentBots, 1, -1 do table.remove(Matrix.Client.ResidentBots, i) end
 end
 
 
@@ -370,6 +386,10 @@ CreateThread(function()
                 local d = VDist(coords, shellData.packaging_pos)
                 if d <= zoneDist then zone, zoneDist = 'packaging', d end
             end
+            if shellData.stash_pos then
+                local d = VDist(coords, shellData.stash_pos)
+                if d <= zoneDist then zone, zoneDist = 'stash', d end
+            end
 
 
             if zone == 'exit' then
@@ -391,6 +411,11 @@ CreateThread(function()
                 DrawWorldPrompt(shellData.packaging_pos, '[E] Paketleme Odasini Ac/Kapat')
                 if IsControlJustPressed(0, 38) then
                     TriggerServerEvent('matrix:server:workbench:togglePackagingRoom', insideTrapHouse)
+                end
+            elseif zone == 'stash' then
+                DrawWorldPrompt(shellData.stash_pos, '[E] Depoyu Ac')
+                if IsControlJustPressed(0, 38) then
+                    TriggerServerEvent('matrix:server:trapHouseInterior:openStash')
                 end
             end
         else

@@ -126,7 +126,11 @@ local function GetResidentBots(trapHouseId)
     local list = {}
     for id, bot in pairs(Matrix.Bots or {}) do
         if bot.status == 'active' and bot.state and bot.state.trap_house_id == trapHouseId then
-            list[#list + 1] = { id = id, name = bot.name, role = bot.role }
+            -- ★ Aşama 0/1: kalıcı ped modeli + rumuz artık burada da
+            -- yayınlanır -- client artık sabit RESIDENT_BOT_PED_MODEL yerine
+            -- botun KENDİ kimliğini kullanabilir (nametag dahil).
+            local pedModel, _, displayName = Matrix.ResolveBotIdentity(bot)
+            list[#list + 1] = { id = id, name = bot.name, role = bot.role, ped_model = pedModel, display_name = displayName }
             if #list >= 20 then break end
         end
     end
@@ -214,6 +218,7 @@ RegisterNetEvent('matrix:server:trapHouseInterior:enter', function(trapHouseId)
         enter_coords  = shell.EnterCoords,
         workbench_pos = shell.WorkbenchPos,
         packaging_pos = shell.PackagingPos,
+        stash_pos     = shell.StashPos,
         exit_coords   = shell.ExitCoords,
         resident_bots = GetResidentBots(trapHouseId),
         ambient_scenarios = Config.TrapHouseInterior.AmbientScenarios
@@ -256,6 +261,57 @@ AddEventHandler('playerDropped', function()
     local trapHouseId = PlayerInteriorState[src]
     if trapHouseId and Occupants[trapHouseId] then Occupants[trapHouseId][src] = nil end
     PlayerInteriorState[src] = nil
+end)
+
+
+-- =====================================================================
+-- DEPO (STASH) — [E] ile açılış.
+-- server/main.lua Matrix.DepositDealerCargoToTrapStash VE server/logistics.lua
+-- Matrix.Logistics.LoadTrunkFromStash/DispatchAmmoRun İLE AYNI stash id
+-- ('matrix_trap_stash_<id>') ve AYNI RegisterStash boyutu (100 slot /
+-- 200000 gr) kullanılır -- ikinci bir depo tablosu İCAT EDİLMEZ, oyuncu
+-- burada botların doldurduğu/boşalttığı AYNI depoyu fiziksel olarak açar.
+-- =====================================================================
+RegisterNetEvent('matrix:server:trapHouseInterior:openStash', function()
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+
+    local trapHouseId = PlayerInteriorState[src]
+    if not trapHouseId then
+        Reply(src, 'Depoyu açmak için önce içeride olmalısınız.')
+        return
+    end
+
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local citizenid = state and state.citizenid
+    if not citizenid or not HasMembership(citizenid) then
+        Reply(src, 'Bu depo size kilitli — örgüt hiyerarşisinde kayıtlı değilsiniz.')
+        return
+    end
+
+    local house = Matrix.TrapHouses[trapHouseId]
+    local stashId    = ('matrix_trap_stash_%d'):format(trapHouseId)
+    local stashLabel = (house and house.label and ('%s Deposu'):format(house.label))
+        or ('Trap House #%d Deposu'):format(trapHouseId)
+
+    local regOk = pcall(function()
+        exports['ox_inventory']:RegisterStash(stashId, stashLabel, 100, 200000)
+    end)
+    if not regOk then
+        Matrix.Log('TRAPHOUSE', '[HATA] openStash: RegisterStash basarisiz (trap=%d, src=%d).', trapHouseId, src)
+        return
+    end
+
+    local openOk = pcall(function()
+        exports['ox_inventory']:openInventory(src, 'stash', stashId)
+    end)
+    if not openOk then
+        Reply(src, 'Depo açılamadı.')
+        Matrix.Log('TRAPHOUSE', '[HATA] openStash: openInventory basarisiz (trap=%d, src=%d).', trapHouseId, src)
+        return
+    end
+
+    Matrix.Log('TRAPHOUSE', 'src=%d trap house #%d deposunu actı (stash=%s).', src, trapHouseId, stashId)
 end)
 
 
@@ -408,6 +464,54 @@ RegisterNetEvent('matrix:server:trapHouseInterior:giveItemToBot', function(botId
 
     Reply(src, ('%s (x%d) Bot #%d envanterine teslim edildi.'):format(slotData.label or slotData.name, transferCount, botId), true)
     Matrix.Log('TRAPHOUSE', 'src=%d -> Bot #%d envanter teslimi: %s x%d', src, botId, slotData.name, transferCount)
+end)
+
+
+--- ★ Aşama 3: simetrik yön — bota daha önce verilen (ya da botun kendi
+--- topladığı) bir eşyayı GERİ ALIR (bot envanterinden oyuncuya). Aynı
+--- GetBotInventoryId/AddItem/RemoveItem deseni, ters yönde.
+RegisterNetEvent('matrix:server:trapHouseInterior:takeItemFromBot', function(botId, botSlot, count)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    botId = tonumber(botId)
+    botSlot = tonumber(botSlot)
+    count = tonumber(count) or 1
+    if not botId or not Matrix.Bots[botId] or not botSlot or count < 1 then
+        Reply(src, 'Gecersiz geri alma parametreleri.')
+        return
+    end
+
+    local inventoryId = GetBotInventoryId(botId)
+    local okSlot, slotData = pcall(function()
+        return exports['ox_inventory']:GetSlot(inventoryId, botSlot)
+    end)
+    if not okSlot or type(slotData) ~= 'table' or not slotData.name then
+        Reply(src, 'Belirtilen slotta bir esya yok.')
+        return
+    end
+
+    local transferCount = math.min(count, tonumber(slotData.count) or 1)
+
+    local removeOk = pcall(function()
+        return exports['ox_inventory']:RemoveItem(inventoryId, slotData.name, transferCount, nil, botSlot)
+    end)
+    if not removeOk then
+        Reply(src, 'Esya bot envanterinden cikarilamadi.')
+        return
+    end
+
+    local addOk = pcall(function()
+        return exports['ox_inventory']:AddItem(src, slotData.name, transferCount, slotData.metadata)
+    end)
+    if not addOk then
+        -- Oyuncuya verilemedi (oyuncu envanteri dolu olabilir) — esyayi bota iade et.
+        pcall(function() return exports['ox_inventory']:AddItem(inventoryId, slotData.name, transferCount, slotData.metadata) end)
+        Reply(src, 'Envanteriniz dolu, geri alma iptal edildi ve esya bota iade edildi.')
+        return
+    end
+
+    Reply(src, ('%s (x%d) Bot #%d envanterinden geri alindi.'):format(slotData.label or slotData.name, transferCount, botId), true)
+    Matrix.Log('TRAPHOUSE', 'src=%d <- Bot #%d envanter geri alma: %s x%d', src, botId, slotData.name, transferCount)
 end)
 
 

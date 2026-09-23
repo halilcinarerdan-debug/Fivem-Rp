@@ -90,9 +90,20 @@ local function GetWeaponDurability(weaponInventoryId, weaponSlot)
 end
 
 
+-- ★ [Aşama 4] Eldiven takılıysa (actor.state.gloves_worn -- bkz.
+-- Matrix.Forensics.SetGlovesWorn), parmak izi kalitesi ANINDA düşürülür.
+-- İki durum çarpımsal DEĞİL, sıralı uygulanır: önce kortizol tabanlı kalite,
+-- sonra eldiven indirimi -- statik bir bonus değil, HER çağrıda güncel
+-- state'i okuyan interaktif bir mekaniktir.
 function Matrix.Forensics.ComputeFingerprintQuality(actor)
     local cortisol = GetActorCortisol(actor)
-    return Matrix.Clamp(1.0 - (cortisol * Config.Forensics.FingerprintQualityCortisolWeight), 0.0, 1.0)
+    local q = Matrix.Clamp(1.0 - (cortisol * Config.Forensics.FingerprintQualityCortisolWeight), 0.0, 1.0)
+
+    if actor and actor.state and actor.state.gloves_worn then
+        q = Matrix.Clamp(q * (1.0 - (Config.Forensics.GloveFingerprintReduction or 0.0)), 0.0, 1.0)
+    end
+
+    return q
 end
 
 
@@ -735,7 +746,52 @@ RegisterNetEvent('matrix:server:reportWeaponDischarge', function(weaponSerial, c
     if type(weaponSlot) ~= 'number' then weaponSlot = nil end
     local ok, err = pcall(Matrix.Forensics.OnWeaponFired, { kind = 'player', source = src }, weaponSerial, casingInventoryId, casingSlot, weaponInventoryId, weaponSlot)
     if not ok then Matrix.Log('FORENSICS', '[HATA] reportWeaponDischarge basarisiz (yutuldu): %s', tostring(err)) end
+
+    -- ★ [Aşama 4] Silah ateşi = mobese için en doğal tetikleyici. Oyuncunun
+    -- ANLIK ped koordinatı ile canlı zon kontrolü yapılır.
+    local ped = GetPlayerPed(src)
+    if ped and ped ~= 0 then
+        pcall(Matrix.Forensics.MaybeLogCCTVSighting, { kind = 'player', source = src }, GetEntityCoords(ped))
+    end
 end)
+
+
+-- ★ Bu iki handler, dosyanın altındaki local Reply()'den ÖNCE dursa da
+-- (Lua'da local fonksiyonlar yalnızca TANIMLANDIKTAN SONRAKİ kod tarafından
+-- görülür) TriggerClientEvent'i doğrudan kullanır -- Reply'a bağımlı DEĞİL.
+local function ReplyChat(src, msg)
+    if type(src) == 'number' and src > 0 then
+        TriggerClientEvent('chat:addMessage', src, { args = { '[FORENSICS]', msg } })
+    end
+end
+
+RegisterNetEvent('matrix:server:forensics:setGlovesWorn', function(worn)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local ok = Matrix.Forensics.SetGlovesWorn({ kind = 'player', source = src }, worn and true or false)
+    if not ok then
+        ReplyChat(src, worn and 'Eldiven takilamadi -- envanterinizde yok.' or 'Eldiven cikarilamadi.')
+        return
+    end
+    ReplyChat(src, worn and 'Eldiven takildi.' or 'Eldiven cikarildi.')
+end)
+
+
+RegisterNetEvent('matrix:server:forensics:setMaskWorn', function(worn)
+    local src = source
+    if type(src) ~= 'number' or src <= 0 then return end
+    local ok = Matrix.Forensics.SetMaskWorn({ kind = 'player', source = src }, worn and true or false)
+    if not ok then
+        ReplyChat(src, worn and 'Maske takilamadi -- envanterinizde yok.' or 'Maske cikarilamadi.')
+        return
+    end
+    ReplyChat(src, worn and 'Maske takildi.' or 'Maske cikarildi.')
+end)
+
+
+exports('SetGlovesWorn', function(actorRef, worn) return Matrix.Forensics.SetGlovesWorn(actorRef, worn) end)
+exports('SetMaskWorn',   function(actorRef, worn) return Matrix.Forensics.SetMaskWorn(actorRef, worn) end)
+exports('MaybeLogCCTVSighting', function(actorRef, coords) return Matrix.Forensics.MaybeLogCCTVSighting(actorRef, coords) end)
 
 
 RegisterNetEvent('matrix:server:reportObjectTouch', function(inventoryId, slot)
@@ -1348,6 +1404,76 @@ function Matrix.Forensics.CollectShells(botId, coords)
 
 
     return true, { collected = collectedCount, found = #matched, duration_ms = durationMs, cortisol_spike = cortisolSpike }
+end
+
+
+-- =====================================================================
+-- ★ [Aşama 4] İNTERAKTİF ELDİVEN / MASKE ANAHTARLARI
+-- Item sahipliği ox_inventory'den (GetItemCount) DOĞRULANIR -- eşya elde
+-- olmadan "takılı" bayrağı asla true olamaz. Bot için invId dealer_<id>,
+-- oyuncu için src kullanılır (ox_inventory ikisini de aynı şekilde kabul eder).
+-- =====================================================================
+local function GetActorInventoryId(actorRef, actor)
+    if actorRef and actorRef.kind == 'player' then return actorRef.source end
+    if actorRef and actorRef.kind == 'bot' and actorRef.id then return ('dealer_%d'):format(actorRef.id) end
+    return nil
+end
+
+local function SetWornFlag(actorRef, itemName, worn, stateField)
+    local actor = Matrix.ResolveActor(actorRef)
+    if not actor or not actor.state then return false, 'actor_unresolved' end
+
+    if worn then
+        local invId = GetActorInventoryId(actorRef, actor)
+        local ok, count = pcall(function() return exports['ox_inventory']:GetItemCount(invId, itemName) end)
+        if not ok or not count or count < 1 then
+            return false, 'item_missing'
+        end
+    end
+
+    actor.state[stateField] = worn and true or false
+    return true
+end
+
+--- F10/komut: eldiven tak/çıkar. worn=true iken envanterde en az 1 adet
+--- Config.Forensics.GloveItemName şart -- yoksa takılamaz.
+function Matrix.Forensics.SetGlovesWorn(actorRef, worn)
+    return SetWornFlag(actorRef, Config.Forensics.GloveItemName, worn, 'gloves_worn')
+end
+
+--- F10/komut: maske tak/çıkar. Aynı doğrulama, Config.Forensics.MaskItemName.
+function Matrix.Forensics.SetMaskWorn(actorRef, worn)
+    return SetWornFlag(actorRef, Config.Forensics.MaskItemName, worn, 'mask_worn')
+end
+
+--- ★ CANLI MOBESE: aktörün güncel koordinatı, ZATEN VAR OLAN
+--- Config.Market.Zones içindeki herhangi bir bölgenin yarıçapı içindeyse,
+--- matrix_cctv_logs'a otomatik bir satır yazılır -- masked, aktörün O ANKİ
+--- mask_worn bayrağından okunur (statik değil). İkinci bir kamera/koordinat
+--- listesi İCAT EDİLMEZ (dosya başı notu).
+function Matrix.Forensics.MaybeLogCCTVSighting(actorRef, coords)
+    if type(coords) ~= 'vector3' and type(coords) ~= 'table' then return false end
+    local actor = Matrix.ResolveActor(actorRef)
+    if not actor then return false end
+
+    local zones = Config.Market and Config.Market.Zones
+    if type(zones) ~= 'table' then return false end
+
+    for _, zone in ipairs(zones) do
+        local zc = zone.coords
+        if zc then
+            local dx, dy = (coords.x - zc.x), (coords.y - zc.y)
+            local dist = math.sqrt(dx * dx + dy * dy)
+            local radius = zone.radius or Config.Forensics.CCTVZoneRadiusFallback or 400.0
+            if dist <= radius then
+                local masked = (actor.state and actor.state.mask_worn) and 1 or 0
+                MySQL.insert('INSERT INTO matrix_cctv_logs (zone_id, dna_id, masked, clothing_tag, created_at) VALUES (?, ?, ?, ?, NOW())',
+                    { zone.id, GetActorDnaId(actor), masked, actorRef.kind == 'bot' and 'bot' or 'player' })
+                return true
+            end
+        end
+    end
+    return false
 end
 
 

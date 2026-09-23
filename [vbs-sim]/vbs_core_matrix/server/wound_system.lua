@@ -341,14 +341,25 @@ end
 
 function Matrix.Wounds.GetAccuracyMultiplier(botId)
     local w = Matrix.Wounds.Bots[botId]
-    if not w then return 1.0 end
-    if w.permanently_crippled == 1 and w.arm_injury >= (Config.BotWounds.CripplingThreshold or 1.0) then
-        return 1.0 - (Config.PermanentCrippling.ArmCraftingShootingPenalty or 0.90)
+    local mult = 1.0
+    if w then
+        if w.permanently_crippled == 1 and w.arm_injury >= (Config.BotWounds.CripplingThreshold or 1.0) then
+            mult = 1.0 - (Config.PermanentCrippling.ArmCraftingShootingPenalty or 0.90)
+        elseif w.arm_injury > 0.0 then
+            mult = 1.0 - (Config.BotWounds.ArmAccuracyPenalty or 0.50)
+        end
     end
-    if w.arm_injury > 0.0 then
-        return 1.0 - (Config.BotWounds.ArmAccuracyPenalty or 0.50)
+
+    -- ★ [Aşama 6] Açık hat/radio static SİMETRİK etki: oyuncuya
+    -- server/main.lua Matrix.Radio.ApplyStatic ne yapıyorsa, kör bölgedeki
+    -- bota da AYNI mantıkla (comms_static bayrağı üzerinden) etki eder.
+    local bot = Matrix.Bots[botId]
+    local static = bot and bot.state and bot.state.comms_static
+    if type(static) == 'number' and static > 0.0 then
+        mult = mult * (1.0 - Matrix.Clamp(static, 0.0, 1.0) * (Config.BotWounds.CommsStaticAccuracyWeight or 0.4))
     end
-    return 1.0
+
+    return mult
 end
 
 function Matrix.Wounds.GetShellCasingQualityOverride(botId)

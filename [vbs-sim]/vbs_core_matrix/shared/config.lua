@@ -740,7 +740,11 @@ Config.TrapHouseInterior = {
         -- Y-eksenli ilerleme deseni (3 birim daha oteye), ayni interior
         -- cebinin icinde. /kameralogutemizle bu konuma yakinlik gerektirir.
         RouterPos    = vector3(258.303, -991.279, -99.015),
-        ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0)
+        ExitCoords   = vector4(261.4586, -998.8196, -99.00863, 180.0),
+        -- ★ DEPO (matrix_trap_stash_<id>) fiziksel [E] etkileşim noktası.
+        -- WorkbenchPos/PackagingPos/RouterPos ile AYNI eksende (X sabit),
+        -- diğer noktalara çakışmayan yeni bir X ofseti kullanılır.
+        StashPos     = vector3(261.303, -997.279, -99.015)
     },
 
 
@@ -1067,6 +1071,22 @@ Config.Forensics.CCTVHackBaseDurationMs           = 12000 -- skill_cyber=0 iken 
 Config.Forensics.CCTVHackSkillDurationFloorMs     = 3000  -- skill_cyber=1.0 iken bile ALTINA inmez
 Config.Forensics.CCTVHackBaseCortisolSpike        = 0.15  -- skill_cyber=0 iken kortizol sicramasi; skill=1.0 iken TAMAMEN engellenir
 
+-- ---------------------------------------------------------------------
+-- ★ [Aşama 4] İNTERAKTİF ELDİVEN + MASKE + CANLI MOBESE (CCTV) TETİĞİ
+-- Eldiven/maske TAKILI/ÇIKARILMIŞ durumu, oyuncu/bot state'inde tutulan
+-- bir BAYRAKTIR (item sahipliği F10/komut anında ox_inventory'den
+-- doğrulanır, ama "takılı mı" bilgisi statik bir pasif bonus DEĞİL,
+-- oyuncunun/botun O ANKİ tercihidir) -- ComputeFingerprintQuality VE
+-- MaybeLogCCTVSighting HER ÇAĞRILDIĞINDA bu bayrağı canlı okur.
+-- CCTV kamera bölgeleri İCAT EDİLMEDİ -- zaten var olan Config.Market.Zones
+-- (matrix_cctv_logs.zone_id ile ZATEN aynı id uzayını paylaşan) yeniden
+-- kullanılır.
+-- ---------------------------------------------------------------------
+Config.Forensics.GloveItemName               = 'eldiven'
+Config.Forensics.GloveFingerprintReduction   = 0.85 -- eldiven takılıyken parmak izi kalitesi bu oranda düşer
+Config.Forensics.MaskItemName                 = 'ski_mask'
+Config.Forensics.CCTVZoneRadiusFallback       = 400.0 -- Config.Market.Zones[i].radius yoksa
+
 -- =====================================================================
 -- OTOMASYONLU REGRESYON ÇEKİRDEĞİ (server/matrix_diagnostics.lua)
 -- Hızlı katman (config sınırları + Matrix.* kanca varlığı + salt-okunur
@@ -1168,7 +1188,7 @@ Config.Mercenary = {
     EnablePhysicalFollowers = true,
 
     MaxFollowers        = 2,
-    PedModel             = 'g_m_y_mexgoon_02',
+    PedModel             = 'g_m_y_mexgoon_02', -- havuz boşsa/eşleşmezse dönülecek sabit yedek model
     SummonRadius         = 3.0,
     FollowDistance       = 3.0,
     -- Bu mesafenin ÜZERİNDE (oyuncudan koptuysa) takipçi ışınlanarak
@@ -1181,6 +1201,42 @@ Config.Mercenary = {
     CheckIntervalMs       = 1500,
     SummonCooldownMs      = 5000
 }
+
+-- ---------------------------------------------------------------------
+-- KALICI BOT KİMLİĞİ (ped modeli + rumuz) HAVUZU
+-- Mevcut Config.BotPedConfiguration / Config.Mercenary.PedModel DEĞİŞTİRİLMEDİ
+-- (matrix_diagnostics.lua'daki katı-string kontrolü bunları bekliyor).
+-- Bu tablolar SADECE Matrix.ResolveBotIdentity() (server/main.lua) tarafından,
+-- bot.id'ye göre deterministik (0 RNG, math.random YOK) indeksleme ile
+-- okunur -- aynı bot.id her zaman aynı model + aynı rumuzu üretir, bu
+-- yüzden ayrı bir DB kolonuna gerek kalmadan "kalıcı" olur.
+-- ---------------------------------------------------------------------
+Config.BotIdentityPool = {
+    -- role -> ped modeli havuzu. Rol havuzda yoksa Config.BotPedConfiguration[role]
+    -- ya da Config.Mercenary.PedModel'e düşülür.
+    PedModels = {
+        ['runner']  = { 's_m_y_dealer_01', 'g_m_y_ballaeast_01', 'g_m_y_famdnf_01' },
+        ['lookout'] = { 'g_m_y_ballaeast_01', 'g_m_m_chidealer_01', 'g_m_y_ballasout_01' },
+        ['guard']   = { 'g_m_y_mexgoon_02', 'g_m_y_mexgoon_01', 'g_m_y_salvagoon_01', 'g_m_y_strpunk_02' },
+        ['chemist'] = { 'g_m_y_vagos_01', 's_m_m_chemsec_01' },
+        ['inspector'] = { 'a_m_m_mexcntry_01' }
+    },
+    -- Deterministik rumuz (F10 listesi ve nametag'de gösterilen isim) havuzu.
+    Callsigns = {
+        'Yılmaz', 'Kartal', 'Bora', 'Deniz', 'Volkan', 'Serdar', 'Kaya',
+        'Doğan', 'Tekin', 'Onur', 'Cengiz', 'Baran', 'Emrah', 'Tolga',
+        'Yiğit', 'Arda', 'Cem', 'Barış', 'Hakan', 'Tarık'
+    }
+}
+
+-- ---------------------------------------------------------------------
+-- HUD / F10-F6 ARAYÜZ AYARLARI
+-- ---------------------------------------------------------------------
+Config.Hud = Config.Hud or {}
+Config.Hud.ShowTeamNametags = true
+Config.Hud.NametagRange     = 30.0      -- bu mesafenin dışındaki takım botları için nametag çizilmez
+Config.Hud.NametagLabel     = '~b~%s ~w~[%s]' -- %s: rumuz, %s: rol/durum etiketi
+Config.Hud.CommandMenuKey   = 'F10'
 
 -- ---------------------------------------------------------------------
 -- [KATMAN 2] YASAL HASTANE (EMS) ADLİ SORGU / TIBBİ SIZINTI DÖNGÜSÜ
@@ -1231,7 +1287,12 @@ Config.BotWounds = {
     -- Karaborsa Ameliyatı (Trap House tedavisi): bu süre boyunca bot
     -- dispatch kabul edemez, sonunda (yalnızca KALICI OLMAYAN) uzuv
     -- hasarları sıfırlanır.
-    TrapHouseTreatmentHours    = 12
+    TrapHouseTreatmentHours    = 12,
+
+    -- ★ [Aşama 6] server/main.lua Matrix.Radio.ApplyStatic'in oyuncuya
+    -- uyguladığı "açık hat/kör bölge" etkisinin bot tarafındaki karşılığı
+    -- (bot.state.comms_static, 0.0-1.0) isabeti bu ağırlıkla düşürür.
+    CommsStaticAccuracyWeight = 0.4
 }
 
 Config.PermanentCrippling = {

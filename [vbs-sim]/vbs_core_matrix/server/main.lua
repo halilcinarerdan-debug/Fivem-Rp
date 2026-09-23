@@ -75,6 +75,37 @@ local function ResolveRolePedModel(role)
     return GetHashKey(modelName), modelName
 end
 
+-- =====================================================================
+-- KALICI BOT KİMLİĞİ (Aşama 0)
+-- bot.id sabit olduğu sürece (silinip yeniden yaratılmadığı sürece) bu
+-- fonksiyon HER ZAMAN aynı ped modelini ve aynı rumuzu döndürür -- 0 RNG,
+-- math.random KULLANILMAZ. DB'ye ayrı bir kolon gerekmez: girdi (bot.id,
+-- bot.role) tamamen deterministik olduğundan çıktı da kalıcıdır.
+-- =====================================================================
+function Matrix.ResolveBotIdentity(bot)
+    if not bot or not bot.id then return nil, nil end
+
+    local pool = Config.BotIdentityPool
+    local pedModelName
+    if pool and pool.PedModels and pool.PedModels[bot.role] and #pool.PedModels[bot.role] > 0 then
+        local list = pool.PedModels[bot.role]
+        local idx = (bot.id % #list) + 1
+        pedModelName = list[idx]
+    else
+        local _, fallbackModel = ResolveRolePedModel(bot.role)
+        pedModelName = fallbackModel
+    end
+
+    local displayName = bot.name
+    if pool and pool.Callsigns and #pool.Callsigns > 0 then
+        local names = pool.Callsigns
+        local idx = (bot.id % #names) + 1
+        displayName = ('%s #%d'):format(names[idx], bot.id)
+    end
+
+    return pedModelName, GetHashKey(pedModelName), displayName
+end
+
 function Matrix.Log(tag, fmt, ...)
     if select('#', ...) > 0 then
         print(('[MATRIX:%s] %s'):format(tag, fmt:format(...)))
@@ -1342,8 +1373,14 @@ function Matrix.TickPhysicalDispatches()
                         if type(dispatch.dispatcher_src) == 'number' and dispatch.dispatcher_src > 0 then
                             Matrix.Radio.ApplyStatic(dispatch.dispatcher_src, 1.0, 'dead_zone')
                         end
+                        -- ★ [Aşama 6] Açık hat SİMETRİKTİR: dispatcher'a static
+                        -- uygulanıyorsa, kör bölgedeki BOTUN KENDİSİ de aynı
+                        -- kopukluğu yaşar -- bkz. server/wound_system.lua
+                        -- GetAccuracyMultiplier (comms_static okur).
+                        bot.state.comms_static = 1.0
                     elseif (not zone) and dispatch.comms_lost then
                         dispatch.comms_lost = false
+                        bot.state.comms_static = 0.0
                         Matrix.Log('CORE', '[SİNYAL YENİDEN ALINDI] Bot #%d kör bölgeden çıktı.', botId)
                         SetTimeout(Config.Logistics.DeadZoneLogFlushDelayMs, function()
                             if Matrix.Dispatches[botId] == dispatch then
@@ -1526,6 +1563,55 @@ lib.callback.register('matrix:callback:getRosterReport', function(src)
 
     return entries
 end)
+
+
+-- =====================================================================
+-- F10 TAKTİK KOMUTA MENÜSÜ — "Kadro Listesi" (Aşama 2)
+-- getRosterReport TÜM örgütü (yönetici raporu) listeler; bu callback
+-- SADECE çağıranın KENDİ ajanlarını (handler_citizenid == kendisi),
+-- hangi trap house'ta olduklarıyla birlikte, id yerine seçilebilir bir
+-- liste olarak döndürür -- F10 menüsünün "id yazma değil seçenek sunma"
+-- gereksinimi buradan beslenir.
+-- =====================================================================
+lib.callback.register('matrix:callback:getMyAgentRoster', function(src)
+    local state = Matrix.GetOrCreatePlayerState(src)
+    local citizenid = state and state.citizenid
+    if not citizenid then return {} end
+
+    local ROLE_LABELS = {
+        runner    = 'Kurye',
+        lookout   = 'Gozcu',
+        chemist   = 'Kimyager',
+        inspector = 'Denetleyici',
+        guard     = 'Muhafiz'
+    }
+
+    local list = {}
+    for id, bot in pairs(Matrix.Bots) do
+        if bot.handler_citizenid == citizenid and bot.status == 'active' then
+            local pedModel, _, displayName = Matrix.ResolveBotIdentity(bot)
+            local houseId = bot.state.trap_house_id
+            local house = houseId and Matrix.TrapHouses and Matrix.TrapHouses[houseId]
+            local houseLabel = house and house.label or (houseId and ('Trap House #' .. houseId)) or 'Sahada / Atanmamis'
+            local durum = bot.state.is_locked and 'MESGUL / INTIKALDE' or 'STABIL / BEKLEMEDE'
+
+            list[#list + 1] = {
+                botId       = id,
+                role        = bot.role,
+                roleLabel   = ROLE_LABELS[bot.role] or bot.role,
+                displayName = displayName,
+                pedModel    = pedModel,
+                trapHouseId = houseId,
+                trapHouseLabel = houseLabel,
+                status      = durum,
+                guardMode   = bot.state.guard_mode
+            }
+        end
+    end
+    table.sort(list, function(a, b) return a.botId < b.botId end)
+    return list
+end)
+
 
 local bureauAccumulator = 0
 

@@ -1733,9 +1733,78 @@ function Matrix.Bureau.RecordTrialResponse(officerSrc, defendantSrc, responseKin
     return true, { verdict = 'pending' }
 end
 
+-- =====================================================================
+-- ★ [Aşama 5] TUTUKLANMA -> SUÇ ORTAĞI YAYILIMI
+-- İkinci bir "kim yakındaydı" tablosu İCAT EDİLMEZ -- ZATEN VAR OLAN
+-- matrix_cctv_logs (zone_id, dna_id, created_at) mahkumun son mobese
+-- görüntüsüyle AYNI zone_id + AYNI zaman penceresindeki diğer dna_id'leri
+-- döndürür (RNG YOK, tamamen kayıt bazlı/deterministik). Eşleşen kayıt bir
+-- bota aitse kortizolü, bir oyuncuya aitse AYNI biology.cortisol_level
+-- alanı (zaten hem bot hem oyuncu state'inde var) yükseltilir -- ikinci
+-- bir "heat" alanı icat edilmez, mevcut stres/baskı vokabüleri kullanılır.
+-- =====================================================================
+local ACCOMPLICE_WINDOW_MINUTES = 10
+local ACCOMPLICE_CORTISOL_SPIKE = 0.35
+
+function Matrix.Bureau.PropagateAccomplices(convictedDnaId)
+    if type(convictedDnaId) ~= 'string' or convictedDnaId == '' then return 0 end
+
+    local anchorRows = MySQL.query.await([[
+        SELECT zone_id, created_at FROM matrix_cctv_logs
+        WHERE dna_id = ? ORDER BY created_at DESC LIMIT 1
+    ]], { convictedDnaId }) or {}
+    local anchor = anchorRows[1]
+    if not anchor then return 0 end
+
+    local accomplices = MySQL.query.await([[
+        SELECT DISTINCT dna_id FROM matrix_cctv_logs
+        WHERE zone_id = ? AND dna_id != ?
+          AND created_at BETWEEN (? - INTERVAL ? MINUTE) AND (? + INTERVAL ? MINUTE)
+    ]], {
+        anchor.zone_id, convictedDnaId,
+        anchor.created_at, ACCOMPLICE_WINDOW_MINUTES,
+        anchor.created_at, ACCOMPLICE_WINDOW_MINUTES
+    }) or {}
+
+    local affected = 0
+    for _, row in ipairs(accomplices) do
+        local dnaId = row.dna_id
+
+        local matchedBot
+        for id, bot in pairs(Matrix.Bots) do
+            if bot.dna_id == dnaId then matchedBot = bot; break end
+        end
+
+        if matchedBot then
+            matchedBot.biology.cortisol_level = Matrix.Clamp(
+                (matchedBot.biology.cortisol_level or 0.0) + ACCOMPLICE_CORTISOL_SPIKE, 0.0, 1.0)
+            Matrix.MarkBotDirty(matchedBot.id)
+            affected = affected + 1
+        else
+            local citizenid = dnaId:match('^DNA%-PLR%-(.+)$')
+            local pState = citizenid and Matrix.PlayerState[citizenid]
+            if pState and pState.biology then
+                pState.biology.cortisol_level = Matrix.Clamp(
+                    (pState.biology.cortisol_level or 0.0) + ACCOMPLICE_CORTISOL_SPIKE, 0.0, 1.0)
+                affected = affected + 1
+            end
+        end
+    end
+
+    Matrix.Log('BUREAU',
+        '[SUC ORTAGI YAYILIMI] mahkum dna=%s zone=%s -> %d suc ortagi kortizol +%.2f ile etkilendi.',
+        convictedDnaId, tostring(anchor.zone_id), affected, ACCOMPLICE_CORTISOL_SPIKE)
+    return affected
+end
+
+exports('PropagateAccomplices', function(dnaId) return Matrix.Bureau.PropagateAccomplices(dnaId) end)
+
+
 function Matrix.Bureau.ExecuteVerdict(officerSrc, session)
     local citizenid   = session.defendant_citizenid
     local defendantSrc = session.defendant_src
+
+    pcall(Matrix.Bureau.PropagateAccomplices, session.dna_id)
 
     MySQL.prepare('UPDATE matrix_player_state SET imprisoned = 1 WHERE citizenid = ?', { citizenid })
     MySQL.prepare([[
