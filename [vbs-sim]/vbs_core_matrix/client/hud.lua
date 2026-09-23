@@ -51,6 +51,15 @@
 -- =====================================================================
 
 
+-- ★ [DÜZELTME] Sunucu tarafında Matrix = Matrix or {} (server/main.lua) ile
+-- paylaşılan bir global vardı, ama CLIENT tarafında hiç tanımlanmamıştı --
+-- client/mercenary_followers.lua ve client/trap_house_client.lua'nın
+-- Matrix.Client tablosunu paylaşması ("attempt to index a nil value
+-- (global 'Matrix')" hatasına yol açıyordu, F6/F10 dahil TÜM keymapping'ler
+-- etkileniyordu). client/hud.lua fxmanifest'te İLK sırada yüklendiği için
+-- global burada tanımlanır.
+Matrix = Matrix or {}
+
 local hudActive = false
 local hudLines  = {}   -- { { text=..., header=true/false, danger=true/false }, ... }
 
