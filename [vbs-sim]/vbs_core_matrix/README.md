@@ -215,6 +215,35 @@ bağlanmaz, doğrudan net-event ile tetiklenir) bu listede DEĞİLDİR — o,
 (rakip/polis bir kapıyı fiziksel bir alet ve gerçek mesafeyle zorlar).
 Sunucu-otoritesi mesafe + envanter kontrolüyle sağlanır, ACE ile değil.
 
+**Kapı Sürgü Tahkimatı — Qbox genel mağazasından satın alma:** F10
+dialogunun yanı sıra, artık `server/door_reinforcement.lua` her seviye
+için bir ox_inventory "kullanılabilir eşya" export'u kaydeder
+(`kapi_tahkimat_seviye1/2/3`). Bu kalemleri kendi mağaza sisteminize
+eklemeniz gerekir:
+
+1. `ox_inventory/data/items.lua`'ya ekleyin:
+   ```lua
+   ['kapi_tahkimat_seviye1'] = { label = 'Kapı Tahkimat Kiti (Seviye 1)', weight = 5000,  stack = true, close = true },
+   ['kapi_tahkimat_seviye2'] = { label = 'Kapı Tahkimat Kiti (Seviye 2)', weight = 8000,  stack = true, close = true },
+   ['kapi_tahkimat_seviye3'] = { label = 'Kapı Tahkimat Kiti (Seviye 3)', weight = 12000, stack = true, close = true },
+   ```
+2. Genel mağaza tanımınıza (qbx_core/ox_inventory shop config) bu üç
+   kalemi `Config.DoorReinforcement.Levels[n].price` (8000/22000/45000)
+   ile AYNI fiyattan satılacak şekilde ekleyin — fiyatı burada
+   değiştirirseniz mağazadaki fiyatı da güncelleyin, aksi halde
+   ekonomi tutarsız olur.
+3. Eşya kullanıldığında (`usingItem`), oyuncunun `Config.DoorReinforcement.
+   ItemUseMaxDistanceMeters` (varsayılan 15m) içindeki EN YAKIN trap
+   house'a otomatik kurulur — manuel ID girişi gerekmez. Ödeme mağazadan
+   alınırken zaten yapıldığı için kurulum sırasında İKİNCİ bir ücret
+   ALINMAZ. Kurulum başarısız olursa (örn. sıra dışı seviye atlama) eşya
+   TÜKETİLMEZ, oyuncu onu kaybetmez.
+4. ox_inventory'nin "kullanılabilir eşya" export sözleşmesi (`usingItem`
+   event adı/argüman sırası) sürüme göre değişebilir — kod bunu pcall
+   ile sarar (yanlış imza sessizce çalışmaz, ÇÖKMEZ). Kurulumdan sonra
+   oyun içinde test edip eşya tüketilip seviye değişmiyorsa, kurulu
+   ox_inventory sürümünüzün dokümantasyonunu kontrol edin.
+
 **`Sandbox: ACE Privilege Verification` (matrix_diagnostics.lua):** Sunucu
 her açıldığında, yukarıdaki üçüncü kategorideki (supervisor-only) HER
 komutun gerçekten `RegisterGatedCommand` üzerinden kayıtlı olduğunu

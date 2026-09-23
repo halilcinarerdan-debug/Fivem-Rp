@@ -147,7 +147,11 @@ function Matrix.DoorReinforcement.GetBreachDelaySeconds(trapHouseId)
 end
 
 
-function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel)
+--- skipCharge=true: magaza-esyasi akisindan cagrildigi anlamina gelir
+--- (odeme ZATEN esyayi satin alirken alindi) -- F10 dialog akisi
+--- (skipCharge=nil/false) ChargeCash'i HER ZAMAN kendi cagirmaya devam eder,
+--- davranis DEGISMEZ.
+function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel, skipCharge)
     trapHouseId = tonumber(trapHouseId)
     targetLevel = tonumber(targetLevel)
     if not trapHouseId or not Matrix.TrapHouses[trapHouseId] then return false, 'bad_trap_house' end
@@ -160,8 +164,10 @@ function Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel)
 
 
     local cfg = Config.DoorReinforcement.Levels[targetLevel]
-    local ok, reason = ChargeCash(src, cfg.price)
-    if not ok then return false, reason end
+    if not skipCharge then
+        local ok, reason = ChargeCash(src, cfg.price)
+        if not ok then return false, reason end
+    end
 
 
     DoorLevel[trapHouseId] = targetLevel
@@ -495,3 +501,98 @@ end, false)
 exports('GetDoorReinforcementLevel', function(trapHouseId) return Matrix.DoorReinforcement.GetLevel(trapHouseId) end)
 exports('GetBreachDelaySeconds', function(trapHouseId) return Matrix.DoorReinforcement.GetBreachDelaySeconds(trapHouseId) end)
 exports('InstallDoorReinforcement', function(src, trapHouseId, targetLevel) return Matrix.DoorReinforcement.Install(src, trapHouseId, targetLevel) end)
+
+
+-- =====================================================================
+-- ★★★ QBOX GENEL MAĞAZASINDAN SATIN ALMA (ox_inventory KULLANILABİLİR EŞYA) ★★★
+-- Kapı Sürgü Tahkimatı artık F10 dialogunun yanı sıra qbx_core'un
+-- kendi genel mağazasından (ox_inventory shop) da satın alınabilir --
+-- ödeme mağazadan alınırken zaten yapıldığı için Install burada
+-- skipCharge=true ile çağrılır (çift ödeme YOK).
+--
+-- ★ KURULUM (server owner tarafından, bu resource'un DIŞINDA):
+--   1) ox_inventory/data/items.lua'ya şu üç kalemi ekleyin:
+--        ['kapi_tahkimat_seviye1'] = { label = 'Kapı Tahkimat Kiti (Seviye 1)', weight = 5000, stack = true, close = true }
+--        ['kapi_tahkimat_seviye2'] = { label = 'Kapı Tahkimat Kiti (Seviye 2)', weight = 8000, stack = true, close = true }
+--        ['kapi_tahkimat_seviye3'] = { label = 'Kapı Tahkimat Kiti (Seviye 3)', weight = 12000, stack = true, close = true }
+--   2) qbx_core/ox_inventory'nin genel mağaza tanımına (data/shops.lua veya
+--      qbx_core shop config'i) bu üç item'ı Config.DoorReinforcement.Levels[n].price
+--      İLE AYNI fiyattan (8000/22000/45000) satılacak şekilde ekleyin.
+--   3) Bu dosya, item KULLANILDIĞINDA (ox_inventory'nin 'usingItem' export
+--      çağrısı) devreye girer -- AŞAĞIDAKİ exports(itemName, ...) bloklarını
+--      DOKUNMADAN bırakın.
+--
+-- ★ ox_inventory SÜRÜM NOTU (composer_intro.lua'daki xsound yorumuyla AYNI
+-- disiplin): export imzası ("usingItem" event adı, argüman sırası)
+-- ox_inventory forkuna/sürümüne göre DEĞİŞEBİLİR. Bu yüzden TÜM gövde
+-- pcall içindedir -- yanlış imza sessizce hiçbir şey yapmaz, ÇÖKMEZ.
+-- Kurulumdan sonra oyun içinde /tahkimatdurum ile doğrulayın; eşya
+-- tüketilip seviye değişmiyorsa, kurulu ox_inventory sürümünüzün
+-- "usingItem" export sözleşmesini (bkz. ox_inventory dokümantasyonu)
+-- kontrol edin.
+-- =====================================================================
+local function FindNearestTrapHouseToPed(src, maxDistance)
+    local ped = GetPlayerPed(src)
+    if not ped or ped == 0 then return nil end
+    local okCoords, coords = pcall(GetEntityCoords, ped)
+    if not okCoords or not coords then return nil end
+
+    local bestId, bestDist = nil, maxDistance
+    for id, house in pairs(Matrix.TrapHouses or {}) do
+        if house.coords then
+            local dx, dy, dz = coords.x - house.coords.x, coords.y - house.coords.y, coords.z - house.coords.z
+            local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+            if d <= bestDist then bestId, bestDist = id, d end
+        end
+    end
+    return bestId
+end
+
+local function HandleDoorReinforcementItemUse(level, src)
+    if type(src) ~= 'number' or src <= 0 then return false end
+
+    local maxDist = Config.DoorReinforcement.ItemUseMaxDistanceMeters or 15.0
+    local trapHouseId = FindNearestTrapHouseToPed(src, maxDist)
+    if not trapHouseId then
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            ('Yakinda (%.0fm icinde) bir trap house yok.'):format(maxDist))
+        return false
+    end
+
+    local ok, resultOrReason = Matrix.DoorReinforcement.Install(src, trapHouseId, level, true)
+    if not ok then
+        local messages = {
+            bad_trap_house            = 'Gecersiz trap house.',
+            no_authority              = 'Bu islemi yapmak icin yeterli rutbeniz yok (Logistics_Officer veya Leader gerekir).',
+            must_upgrade_sequentially = 'Tahkimat yalnizca bir ust seviyeye sirayla yukseltilebilir -- once bir onceki seviyeyi kurun.'
+        }
+        TriggerClientEvent('matrix:client:actionNotify', src, false,
+            messages[resultOrReason] or ('Kurulum basarisiz: %s'):format(tostring(resultOrReason)))
+        return false -- ★ item TUKETILMEZ -- oyuncu esyayi kaybetmez.
+    end
+
+    TriggerClientEvent('matrix:client:actionNotify', src, true,
+        ('%s monte edildi (Trap #%d). Magazadan satin alindi.'):format(resultOrReason.label, trapHouseId))
+    return true -- ★ item BURADA tuketilir (asagidaki pcall govdesi).
+end
+
+for level, cfg in pairs(Config.DoorReinforcement.Levels) do
+    if cfg.item_name then
+        local itemName = cfg.item_name
+        local thisLevel = level
+        pcall(function()
+            exports(itemName, function(event, item, inventory, slot, data)
+                if event ~= 'usingItem' then return end
+                local src = inventory and inventory.id
+                if type(src) ~= 'number' then return end
+
+                local consumed = HandleDoorReinforcementItemUse(thisLevel, src)
+                if consumed then
+                    pcall(function()
+                        exports['ox_inventory']:RemoveItem(src, itemName, 1, nil, slot)
+                    end)
+                end
+            end)
+        end)
+    end
+end

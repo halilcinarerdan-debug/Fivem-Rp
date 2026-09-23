@@ -827,12 +827,21 @@ Config.PackagingRoom = {
 -- ---------------------------------------------------------------------
 Config.DoorReinforcement = {
     MaxLevel = 3,
+    -- item_name: qbx/ox_inventory genel mağazasından satın alınan, KULLANILDIĞINDA
+    -- (bkz. server/door_reinforcement.lua exports(item_name, ...)) bu seviyeyi
+    -- en yakın trap house'a kuran esya. Magaza fiyati = price (asagida) --
+    -- kullanildiginda AYRICA ChargeCash CAGRILMAZ (cift odeme olmasin diye);
+    -- odeme ZATEN magazadan satin alirken alinmis olur.
     Levels = {
-        [0] = { label = 'Takviyesiz Eski Ahşap Kapı',      price = 0,     breach_bonus_seconds = 0   },
-        [1] = { label = 'Takviyeli Ahşap Sürgü',           price = 8000,  breach_bonus_seconds = 60  },
-        [2] = { label = 'Çelik Sürgü Barikatı',            price = 22000, breach_bonus_seconds = 150 },
-        [3] = { label = 'Çift Katlı Çelik Barikat (Maks)', price = 45000, breach_bonus_seconds = 220 }
+        [0] = { label = 'Takviyesiz Eski Ahşap Kapı',      price = 0,     breach_bonus_seconds = 0,   item_name = nil },
+        [1] = { label = 'Takviyeli Ahşap Sürgü',           price = 8000,  breach_bonus_seconds = 60,  item_name = 'kapi_tahkimat_seviye1' },
+        [2] = { label = 'Çelik Sürgü Barikatı',            price = 22000, breach_bonus_seconds = 150, item_name = 'kapi_tahkimat_seviye2' },
+        [3] = { label = 'Çift Katlı Çelik Barikat (Maks)', price = 45000, breach_bonus_seconds = 220, item_name = 'kapi_tahkimat_seviye3' }
     },
+    -- Item kullanildiginda trap house'un OTOMATIK cozulmesi icin gereken
+    -- maksimum mesafe (metre) -- F10 dialogunun manuel ID girisine ALTERNATIF,
+    -- magaza-esyasi akisi ICIN.
+    ItemUseMaxDistanceMeters = 15.0,
 
     -- ★ DÜŞMAN TRAP HOUSE KAPI KIRMA DONANIMI: sunucu-otoriteli, fiziksel
     -- olarak elde tutulan (ox_inventory'den DOĞRULANAN) bir alet üzerinden
